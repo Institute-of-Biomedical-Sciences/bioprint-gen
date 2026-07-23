@@ -1,0 +1,33 @@
+# BioprintGEN runtime dependencies.  Requires Python 3.10+ (verified on 3.12).
+#
+# The pins below are *minimum* versions (">=") — the lowest release whose API we
+# rely on.  On a fresh `pip install -r requirements.txt` this resolves to the
+# newest compatible release, so a clean install gets the latest automatically.
+# It does NOT upgrade packages that are already installed; for that use:
+#
+#     pip install -U -r requirements.txt
+#
+# Versions in brackets are what this build was verified against (all current on
+# PyPI as of 2026-07-23, except contourpy where 1.3.3 is latest and 1.2.1 also
+# works).
+
+# --- imported directly by BioprintGEN ---
+PySide6>=6.6           # Qt GUI: widgets, QGraphicsView preview, markdown help   [6.11.1]
+numpy>=1.24            # vector math throughout                                   [2.5.1]
+shapely>=2.0           # 2D geometry: insets, clipping, hole handling, covers()   [2.1.2]
+trimesh>=4.0           # STL load + planar cross-sectioning (Path3D.to_2D)        [4.12.2]
+contourpy>=1.2         # gyroid zero-isocontour extraction                        [1.2.1 / 1.3.3]
+
+# --- required BY trimesh for the STL slicing path ---
+# trimesh declares only numpy as a hard dependency and treats everything below as
+# an optional "extra", so pip will NOT pull these in on its own — but STL slicing
+# fails without them.  Verified by blocking each module and re-slicing.
+scipy>=1.10            # trimesh geometry ops                                     [1.18.0]
+networkx>=3.0          # trimesh path/graph traversal used by section()->to_2D()  [3.6.1]
+rtree>=1.0             # spatial index for polygons_full interior-hole detection  [1.4.1]
+manifold3d>=2.3        # robust mesh booleans used by trimesh                     [3.5.2]
+
+# Not needed: trimesh also imports pillow and charset-normalizer when present,
+# but degrades gracefully without them — the full pipeline (every infill x every
+# dialect) was verified with both blocked.  Install `trimesh[easy]` instead of
+# the four lines above if you prefer to cover all of trimesh's optional deps.

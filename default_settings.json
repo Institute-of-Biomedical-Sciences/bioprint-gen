@@ -1,0 +1,65 @@
+{
+  "_comment": "Edit these values to change what BioprintGEN starts with. The app only reads this file, it never writes it. Unknown keys are ignored; missing keys use built-in defaults.",
+  "ui": {
+    "theme": "dark",
+    "expanded_panels": [
+      "Source"
+    ]
+  },
+  "source": {
+    "kind": "cuboid",
+    "width": 10.0,
+    "depth": 10.0,
+    "height": 5.0,
+    "diameter": 10.0,
+    "stl_path": null
+  },
+  "print_settings": {
+    "layer_height": 0.2,
+    "first_layer_height": null,
+    "layer_sections": [],
+    "line_width": 0.25,
+    "strand_spacing": 1.0,
+    "infill_angle": 0.0,
+    "layer_rotation": 90.0,
+    "infill_type": "rectilinear_connected",
+    "gyroid_period": 6.0,
+    "perimeters": 0,
+    "print_speed": 500.0,
+    "travel_speed": 1600.0,
+    "z_speed": 300.0,
+    "dialect": "planet_cnc",
+    "custom_flavour": null,
+    "drive": "piston",
+    "extruder_index": 1,
+    "ext_per_10mm": 0.1,
+    "ramp": 0.05,
+    "flow_control": false,
+    "valve_value": 1.0,
+    "filament_area": 1.0,
+    "tool_change_enabled": false,
+    "extruder2_offset": [
+      0.0,
+      0.0
+    ],
+    "extruder3_offset": [
+      0.0,
+      0.0
+    ],
+    "tool_line_ranges": [],
+    "flow_start_ramp": 0.0,
+    "flow_end_retract": 0.0,
+    "start_dwell": 0.0,
+    "coast_distance": 0.0,
+    "zero_xy_at_start": true,
+    "safe_z": 2.0,
+    "skirt": false,
+    "skirt_distance": 2.0,
+    "skirt_loops": 1,
+    "start_gcode": "",
+    "end_gcode": "",
+    "write_settings_header": true,
+    "gcode_line_ending": "crlf",
+    "minimize_crossings": true
+  }
+}

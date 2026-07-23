@@ -1,0 +1,8 @@
+# Development / testing extras.  Not needed to run the app.
+#
+#     pip install -r requirements-dev.txt
+#     pytest                      # full suite, ~3 s
+#     pytest -m "not slow"        # skip anything marked slow
+
+-r requirements.txt
+pytest>=8.0            # test runner                                          [9.1.1]
