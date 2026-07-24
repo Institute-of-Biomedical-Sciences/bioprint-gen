@@ -117,6 +117,7 @@ pip install -r requirements.txt
 ```bash
 python main.py
 ```
+Instead of running the file from command line on Windows, you can also use the bat file, in which you set the repository folder path and use it as a shortcut by double clicking.
 
 ## Tests
 
