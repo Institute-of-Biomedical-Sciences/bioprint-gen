@@ -15,13 +15,15 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTextBrowser, QPushButton, QLabel,
 )
 
+from . import theme
+
 
 class MarkdownViewer(QDialog):
     def __init__(self, path, title: str, parent=None):
         super().__init__(parent)
         self._path = Path(path)
         self.setWindowTitle(title)
-        self.resize(900, 720)
+        self.resize(theme.px(900), theme.px(720))
 
         v = QVBoxLayout(self)
         self.browser = QTextBrowser()

@@ -74,12 +74,16 @@ generic **Marlin** flavor with absolute E.
   rewrites the underlying move(s) and **regenerates the g-code instantly**.
   **Double-click a line to insert a vertex; right-click a vertex to delete it.**
 - **Light and dark themes**, toggled from the top-right of the toolbar.
+- **Scalable interface** — A− / A+ (and `Ctrl+-` / `Ctrl+=` / `Ctrl+0`) scale the whole
+  UI from 70 % to 250 % for small or high-DPI screens; the choice is saved to
+  `default_settings.json` (`ui.scale`) and the 2D preview stays at its fixed size.
 - **Collapsible parameter panels** so a long settings list stays navigable, and inputs
   that **ignore the mouse wheel until clicked**, so scrolling can't nudge a value.
 - **Editable startup defaults** — `default_settings.json` in the project folder is read
-  at launch (theme, which panels are open, source shape, and every print setting). The
-  app never writes it; edit it in a text editor and restart. Unknown/missing keys are
-  tolerated.
+  at launch (theme, scale, which panels are open, source shape, and every print setting).
+  Edit it in a text editor and restart. The app only ever writes one key back —
+  `ui.scale`, from the zoom control — leaving everything else you hand-edit untouched;
+  unknown/missing keys are tolerated.
 - **Help menu** — renders `README.md` and `MANUAL.md` live from disk (with images), so
   edits show up without restarting.
 - **Platform-independent export** — g-code is written as UTF-8 with an explicit line
@@ -181,7 +185,7 @@ panel — saved flavours live under `~/.bioprintgen/flavours` (override with the
 bioprintgen/
 ├── main.py                     entry point
 ├── requirements.txt
-├── default_settings.json       user-editable startup defaults (read-only to the app)
+├── default_settings.json       user-editable startup defaults (app only writes ui.scale)
 ├── MANUAL.md                   detailed user manual (Help → User manual)
 ├── bioprintgen/
 │   ├── model.py                dataclasses / enums / PrintSettings

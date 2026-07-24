@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QTextCursor, QColor, QTextCharFormat, QBrush
+from PySide6.QtGui import (
+    QAction, QTextCursor, QColor, QTextCharFormat, QBrush, QShortcut, QKeySequence,
+)
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QDockWidget, QSlider,
     QLabel, QPlainTextEdit, QFileDialog, QMessageBox, QPushButton, QToolBar,
@@ -98,11 +100,10 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         # panel dock
         self.panel = ParameterPanel()
-        dock = QDockWidget("Parameters", self)
-        dock.setWidget(self.panel)
-        dock.setFeatures(QDockWidget.DockWidgetMovable)
-        dock.setMinimumWidth(310)
-        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
+        self._param_dock = QDockWidget("Parameters", self)
+        self._param_dock.setWidget(self.panel)
+        self._param_dock.setFeatures(QDockWidget.DockWidgetMovable)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self._param_dock)
 
         # centre: preview + slider
         centre = QWidget()
@@ -118,7 +119,6 @@ class MainWindow(QMainWindow):
         self.layer_slider.valueChanged.connect(self._on_layer_change)
         self.layer_label = QLabel("layer 0")
         self.layer_label.setObjectName("stat")
-        self.layer_label.setMinimumWidth(120)
         prev_btn = QToolButton()
         prev_btn.setArrowType(Qt.LeftArrow)
         prev_btn.setToolTip("Previous layer")
@@ -165,7 +165,6 @@ class MainWindow(QMainWindow):
         self.gdock = QDockWidget("G-code", self)
         self.gdock.setWidget(gpanel)
         self.gdock.setFeatures(QDockWidget.DockWidgetMovable)
-        self.gdock.setMinimumWidth(360)
         self.addDockWidget(Qt.RightDockWidgetArea, self.gdock)
 
         # side-view (elevation) inset, floating over the top-right of the preview
@@ -175,7 +174,16 @@ class MainWindow(QMainWindow):
         self.side_inset.show()
 
         self._build_toolbar()
+        self._apply_scaled_sizes()
         self.statusBar().showMessage("Ready")
+
+    def _apply_scaled_sizes(self):
+        """Re-apply the Python-set widget sizes at the current UI scale (the
+        stylesheet handles the rest).  Called at build time and on every zoom."""
+        self._param_dock.setMinimumWidth(theme.px(310))
+        self.gdock.setMinimumWidth(theme.px(360))
+        self.layer_label.setMinimumWidth(theme.px(120))
+        self.panel.apply_scaled_sizes()
 
     def _build_toolbar(self):
         tb = QToolBar()
@@ -207,10 +215,33 @@ class MainWindow(QMainWindow):
         help_btn.setMenu(menu)
         tb.addWidget(help_btn)
 
-        # push the theme toggle to the far right
+        # push the zoom + theme controls to the far right
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer)
+
+        # UI scale control (persisted to default_settings.json)
+        zoom_out = QToolButton()
+        zoom_out.setText("A−")
+        zoom_out.setToolTip("Smaller interface (Ctrl+-)")
+        zoom_out.clicked.connect(lambda: self._nudge_ui_scale(-theme.SCALE_STEP))
+        tb.addWidget(zoom_out)
+        self.scale_label = QLabel(f"{round(theme.current_scale() * 100)}%")
+        self.scale_label.setObjectName("stat")
+        self.scale_label.setAlignment(Qt.AlignCenter)
+        self.scale_label.setMinimumWidth(theme.px(46))
+        tb.addWidget(self.scale_label)
+        zoom_in = QToolButton()
+        zoom_in.setText("A+")
+        zoom_in.setToolTip("Larger interface (Ctrl+=)")
+        zoom_in.clicked.connect(lambda: self._nudge_ui_scale(theme.SCALE_STEP))
+        tb.addWidget(zoom_in)
+        for keys in ("Ctrl+=", "Ctrl++"):
+            QShortcut(QKeySequence(keys), self, activated=lambda: self._nudge_ui_scale(theme.SCALE_STEP))
+        QShortcut(QKeySequence("Ctrl+-"), self, activated=lambda: self._nudge_ui_scale(-theme.SCALE_STEP))
+        QShortcut(QKeySequence("Ctrl+0"), self, activated=lambda: self._set_ui_scale(1.0))
+        tb.addSeparator()
+
         self.theme_btn = QToolButton()
         self.theme_btn.setCheckable(True)
         self.theme_btn.setChecked(theme.current_theme() == "light")
@@ -226,6 +257,22 @@ class MainWindow(QMainWindow):
         path = root / filename
         dlg = MarkdownViewer(path, title, self)
         dlg.exec()
+
+    # ------------------------------------------------------------------ ui scale
+    def _nudge_ui_scale(self, delta: float):
+        self._set_ui_scale(theme.current_scale() + delta)
+
+    def _set_ui_scale(self, scale: float):
+        applied = theme.set_scale(scale)
+        QApplication.instance().setStyleSheet(theme.build_qss())
+        self._apply_scaled_sizes()
+        self.scale_label.setText(f"{round(applied * 100)}%")
+        if settingsio.save_ui_scale(applied):
+            self.statusBar().showMessage(f"Interface scale {round(applied * 100)}%")
+        else:
+            self.statusBar().showMessage(
+                f"Interface scale {round(applied * 100)}% "
+                "(could not save to default_settings.json)")
 
     # ------------------------------------------------------------------ theme
     def _toggle_theme(self, light: bool):
@@ -562,12 +609,14 @@ class MainWindow(QMainWindow):
 def run():
     import sys
     app = QApplication(sys.argv)
-    # startup theme comes from default_settings.json (ui.theme)
-    name = "dark"
+    # startup theme + scale come from default_settings.json (ui.theme, ui.scale)
+    name, scale = "dark", 1.0
     loaded = settingsio.load_defaults()
     if loaded:
-        name = (loaded[2].get("theme") or "dark").lower()
-    theme.apply_theme(app, name if name in theme.THEMES else "dark")
+        ui = loaded[2]
+        name = (ui.get("theme") or "dark").lower()
+        scale = ui.get("scale", 1.0)
+    theme.apply_theme(app, name if name in theme.THEMES else "dark", scale)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

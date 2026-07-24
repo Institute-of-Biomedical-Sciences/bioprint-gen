@@ -23,6 +23,7 @@ from ..model import (
 )
 from ..gcode import flavour as flavourmod
 from .flavourdialog import FlavourDialog
+from . import theme
 
 
 @dataclass
@@ -142,7 +143,7 @@ class SectionTable(QWidget):
         self.table.setHorizontalHeaderLabels([c.label for c in cols])
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.setMaximumHeight(150)
+        self.table.setMaximumHeight(theme.px(150))
         lay.addWidget(self.table)
         btns = QHBoxLayout()
         add = QPushButton("+ Add")
@@ -195,6 +196,9 @@ class SectionTable(QWidget):
     def clear_rows(self):
         while self.table.rowCount():
             self.table.removeRow(0)
+
+    def apply_scale(self):
+        self.table.setMaximumHeight(theme.px(150))
 
     def set_current_cell(self, col: int, value: float):
         """Set column `col` of the selected (or last) row; adds a row if empty."""
@@ -252,6 +256,13 @@ class ParameterPanel(QScrollArea):
 
     def expanded_panels(self) -> List[str]:
         return [t for t, s in self.sections.items() if s.is_expanded()]
+
+    def apply_scaled_sizes(self):
+        """Re-apply the panel's Python-set widget sizes at the current UI scale."""
+        self.layer_sections.apply_scale()
+        self.tool_ranges.apply_scale()
+        self.start_gcode.setMaximumHeight(theme.px(90))
+        self.end_gcode.setMaximumHeight(theme.px(90))
 
     # ------------------------------------------------------------------ groups
     def _source_group(self):
@@ -453,10 +464,10 @@ class ParameterPanel(QScrollArea):
         self.start_gcode = QPlainTextEdit()
         self.start_gcode.setPlaceholderText("Injected after the machine header, "
                                             "before the first layer")
-        self.start_gcode.setMaximumHeight(90)
+        self.start_gcode.setMaximumHeight(theme.px(90))
         self.end_gcode = QPlainTextEdit()
         self.end_gcode.setPlaceholderText("Injected before the footer / safe-Z move")
-        self.end_gcode.setMaximumHeight(90)
+        self.end_gcode.setMaximumHeight(theme.px(90))
         f.addRow("Start g-code", self.start_gcode)
         f.addRow("End g-code", self.end_gcode)
         return g

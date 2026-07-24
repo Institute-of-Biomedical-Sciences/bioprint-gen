@@ -105,17 +105,54 @@ def load_defaults(path: Optional[Path] = None) -> Optional[Tuple[PrintSettings, 
            (ui if isinstance(ui, dict) else {})
 
 
-def write_template(path: Optional[Path] = None) -> Path:
-    """Write a fully-populated defaults file (used to seed the shipped file)."""
-    p = Path(path) if path else default_settings_path()
-    doc = {
-        "_comment": "Edit these values to change what BioprintGEN starts with. "
-                    "The app only reads this file, it never writes it. "
-                    "Unknown keys are ignored; missing keys use built-in defaults.",
-        "ui": {"theme": "dark", "expanded_panels": ["Source"]},
+_COMMENT = ("Edit these values to change what BioprintGEN starts with. The app "
+            "only writes ui.scale here (from the toolbar zoom control); everything "
+            "else is yours to hand-edit. Unknown keys are ignored; missing keys use "
+            "built-in defaults.")
+
+
+def _template_doc() -> dict:
+    return {
+        "_comment": _COMMENT,
+        "ui": {"theme": "dark", "scale": 1.0, "expanded_panels": ["Source"]},
         "source": {"kind": "cuboid", "width": 10.0, "depth": 10.0,
                    "height": 5.0, "diameter": 12.0, "stl_path": None},
         "print_settings": settings_to_dict(PrintSettings()),
     }
-    p.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+
+
+def write_template(path: Optional[Path] = None) -> Path:
+    """Write a fully-populated defaults file (used to seed the shipped file)."""
+    p = Path(path) if path else default_settings_path()
+    p.write_text(json.dumps(_template_doc(), indent=2), encoding="utf-8")
     return p
+
+
+def save_ui_scale(scale: float, path: Optional[Path] = None) -> bool:
+    """Persist just `ui.scale`, preserving every other (hand-edited) key.
+
+    Refuses to touch a file it cannot parse, so a malformed file is never
+    clobbered.  If the file is absent it is seeded from the template so it stays
+    a complete, hand-editable document.  Returns True on success.
+    """
+    p = Path(path) if path else default_settings_path()
+    data = None
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if not isinstance(data, dict):
+            return False
+    if data is None:
+        data = _template_doc()
+    ui = data.get("ui")
+    if not isinstance(ui, dict):
+        ui = {}
+    ui["scale"] = round(float(scale), 3)
+    data["ui"] = ui
+    try:
+        p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return True
+    except OSError:
+        return False

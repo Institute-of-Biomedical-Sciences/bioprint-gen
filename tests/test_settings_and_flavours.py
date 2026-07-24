@@ -66,6 +66,58 @@ def test_missing_defaults_file_is_tolerated(tmp_path):
     assert settingsio.load_defaults(tmp_path / "nope.json") is None
 
 
+# --------------------------------------------------------------------------- #
+#  ui.scale persistence (the one key the app writes back)
+# --------------------------------------------------------------------------- #
+def test_save_ui_scale_preserves_every_other_key(tmp_path):
+    p = tmp_path / "default_settings.json"
+    original = {
+        "_comment": "mine",
+        "ui": {"theme": "light", "expanded_panels": ["Source", "Infill"]},
+        "source": {"kind": "cylinder", "diameter": 22.0},
+        "print_settings": {"layer_height": 0.33},
+    }
+    p.write_text(json.dumps(original, indent=2), encoding="utf-8")
+    assert settingsio.save_ui_scale(1.4, p) is True
+    back = json.loads(p.read_text(encoding="utf-8"))
+    assert back["ui"]["scale"] == 1.4
+    assert back["ui"]["theme"] == "light"                 # untouched
+    assert back["ui"]["expanded_panels"] == ["Source", "Infill"]
+    assert back["source"] == {"kind": "cylinder", "diameter": 22.0}
+    assert back["print_settings"] == {"layer_height": 0.33}
+    assert back["_comment"] == "mine"
+
+
+def test_save_ui_scale_seeds_a_missing_file(tmp_path):
+    p = tmp_path / "default_settings.json"
+    assert settingsio.save_ui_scale(1.25, p) is True
+    loaded = settingsio.load_defaults(p)
+    assert loaded is not None
+    assert loaded[2]["scale"] == 1.25
+    # seeded into a full, hand-editable document
+    assert "print_settings" in json.loads(p.read_text(encoding="utf-8"))
+
+
+def test_save_ui_scale_never_clobbers_a_malformed_file(tmp_path):
+    p = tmp_path / "default_settings.json"
+    p.write_text("{ not valid json", encoding="utf-8")
+    assert settingsio.save_ui_scale(1.4, p) is False
+    assert p.read_text(encoding="utf-8") == "{ not valid json"
+
+
+def test_load_defaults_reads_ui_scale(tmp_path):
+    p = tmp_path / "default_settings.json"
+    p.write_text(json.dumps({"ui": {"scale": 1.75}}), encoding="utf-8")
+    _s, _src, ui = settingsio.load_defaults(p)
+    assert ui["scale"] == 1.75
+
+
+def test_shipped_defaults_file_has_scale():
+    loaded = settingsio.load_defaults()
+    assert loaded is not None
+    assert loaded[2].get("scale") == 1.0
+
+
 def test_malformed_defaults_file_is_tolerated(tmp_path):
     bad = tmp_path / "default_settings.json"
     bad.write_text("{ not json", encoding="utf-8")

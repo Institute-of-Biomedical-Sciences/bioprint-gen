@@ -25,6 +25,14 @@ starts expanded — open the ones you are working with to keep the list short.
 click them. So you can scroll the parameter list without nudging values by
 accident. Click a field first, then the wheel adjusts it.
 
+**Interface scale.** The far-right of the toolbar has an **A− / A+** pair (and
+`Ctrl+-` / `Ctrl+=`, with `Ctrl+0` to reset) that scales the whole interface —
+text, buttons, panels, tables — from 70 % to 250 %, so it fits comfortably on a
+small laptop or a large high-DPI monitor. The 2D preview itself (the toolpath
+dots and line weights) is left at its fixed size on purpose. Your chosen scale is
+saved to `default_settings.json` (`ui.scale`) and restored next run — this is the
+one value the app writes to that file; everything else there is yours to edit.
+
 **Settings that don't apply are greyed out** (field and caption together), so you
 can see at a glance what the current selection actually uses:
 
@@ -237,6 +245,7 @@ The app reads `default_settings.json` from the project folder at startup. It
 ```
 
 - `ui.theme` — `"dark"` or `"light"`.
+- `ui.scale` — interface scale (0.7–2.5). Also set live by the toolbar A− / A+.
 - `print_settings.gcode_line_ending` — `"crlf"` (default) or `"lf"` for exports.
 - `ui.expanded_panels` — panel titles to open on startup, e.g.
   `["Source", "Flow control (start–stop behaviour)"]`.

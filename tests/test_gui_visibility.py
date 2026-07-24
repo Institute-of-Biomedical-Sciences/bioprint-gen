@@ -142,3 +142,51 @@ def test_disabled_fields_still_report_values(panel):
     panel.width.setValue(42.0)
     assert panel.source_spec().width == 42.0
     assert panel.build_settings().layer_height > 0
+
+
+# --------------------------------------------------------------------------- #
+#  UI scale (surrounding chrome only)
+# --------------------------------------------------------------------------- #
+def test_px_scales_with_the_factor(app):
+    from bioprintgen.gui import theme
+    theme.set_scale(1.0)
+    assert theme.px(12) == 12
+    theme.set_scale(2.0)
+    assert theme.px(12) == 24
+    theme.set_scale(1.0)
+
+
+def test_px_never_returns_zero_for_positive_bases(app):
+    from bioprintgen.gui import theme
+    theme.set_scale(theme.SCALE_MIN)
+    assert theme.px(1) >= 1
+    theme.set_scale(1.0)
+
+
+def test_scale_is_clamped(app):
+    from bioprintgen.gui import theme
+    assert theme.set_scale(99.0) == theme.SCALE_MAX
+    assert theme.set_scale(0.01) == theme.SCALE_MIN
+    assert theme.set_scale("nonsense") == 1.0
+    theme.set_scale(1.0)
+
+
+def test_qss_font_size_tracks_the_scale(app):
+    from bioprintgen.gui import theme
+    theme.set_scale(1.0)
+    assert "font-size: 12px" in theme.build_qss()
+    theme.set_scale(2.0)
+    assert "font-size: 24px" in theme.build_qss()
+    theme.set_scale(1.0)
+
+
+def test_panel_scaled_sizes_grow(app):
+    from bioprintgen.gui import theme
+    from bioprintgen.gui.controls import ParameterPanel
+    theme.set_scale(1.0)
+    p = ParameterPanel()
+    small = p.start_gcode.maximumHeight()
+    theme.set_scale(2.0)
+    p.apply_scaled_sizes()
+    assert p.start_gcode.maximumHeight() > small
+    theme.set_scale(1.0)

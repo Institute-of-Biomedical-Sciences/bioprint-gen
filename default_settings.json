@@ -1,7 +1,8 @@
 {
-  "_comment": "Edit these values to change what BioprintGEN starts with. The app only reads this file, it never writes it. Unknown keys are ignored; missing keys use built-in defaults.",
+  "_comment": "Edit these values to change what BioprintGEN starts with. The app only writes ui.scale here (from the toolbar zoom control); everything else is yours to hand-edit. Unknown keys are ignored; missing keys use built-in defaults.",
   "ui": {
     "theme": "dark",
+    "scale": 0.9,
     "expanded_panels": [
       "Source"
     ]
@@ -11,20 +12,20 @@
     "width": 10.0,
     "depth": 10.0,
     "height": 5.0,
-    "diameter": 10.0,
+    "diameter": 12.0,
     "stl_path": null
   },
   "print_settings": {
     "layer_height": 0.2,
     "first_layer_height": null,
     "layer_sections": [],
-    "line_width": 0.25,
+    "line_width": 0.41,
     "strand_spacing": 1.0,
     "infill_angle": 0.0,
     "layer_rotation": 90.0,
     "infill_type": "rectilinear_connected",
     "gyroid_period": 6.0,
-    "perimeters": 0,
+    "perimeters": 1,
     "print_speed": 500.0,
     "travel_speed": 1600.0,
     "z_speed": 300.0,

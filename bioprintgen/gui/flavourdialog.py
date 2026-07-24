@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from ..gcode import flavour as flavourmod
 from ..gcode.flavour import FlavourTemplate
+from . import theme
 
 
 # (attribute, label, placeholder hint)
@@ -36,7 +37,7 @@ class FlavourDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Custom g-code flavours")
-        self.resize(560, 640)
+        self.resize(theme.px(560), theme.px(640))
         self.last_saved_name: Optional[str] = None
         self._edits: Dict[str, QPlainTextEdit] = {}
 
@@ -63,7 +64,7 @@ class FlavourDialog(QDialog):
         form.addRow("Comment prefix", self.prefix_edit)
         for attr, label, hint in _FIELDS:
             ed = QPlainTextEdit()
-            ed.setMaximumHeight(70)
+            ed.setMaximumHeight(theme.px(70))
             ed.setPlaceholderText(hint)
             self._edits[attr] = ed
             form.addRow(label, ed)
