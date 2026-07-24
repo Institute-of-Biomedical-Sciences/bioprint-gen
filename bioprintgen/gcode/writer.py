@@ -294,16 +294,23 @@ class PlanetCNCWriter:
                     active = tool
                 axis_letter, axis_var = self._axis_for(active)
                 valve_p = active if s.tool_change_enabled else s.extruder_index
+                is_travel = (not m.extrude) and not emit.coast
+
+                # stop flow before any repositioning (so a hop can't ooze)
+                if s.drive == DriveMode.PNEUMATIC and (not m.extrude) and valve_open:
+                    out.append(GLine(f"M63 P{valve_p} Q10000 E0", kind="valve", layer=li))
+                    valve_open = False
+                # safe-height hop up before a travel
+                if is_travel and s.travel_lift > 0:
+                    out.append(GLine(f"G1\tZ[#<_z> +{_fmt(s.travel_lift,4)}]\tF{_fmt(s.z_speed,0)} ;safe up",
+                                     kind="layer", layer=li))
+
                 if s.drive == DriveMode.PNEUMATIC:
                     if m.extrude and not valve_open:
                         out.append(GLine(
                             f"M63 P{valve_p} Q10000 E{_fmt(s.valve_value*10,3)}",
                             kind="valve", layer=li))
                         valve_open = True
-                    elif (not m.extrude) and valve_open:
-                        out.append(GLine(f"M63 P{valve_p} Q10000 E0",
-                                         kind="valve", layer=li))
-                        valve_open = False
                     if emit.stroke_start and s.start_dwell > 0:
                         out.append(GLine(f"G4\tP{_fmt(s.start_dwell,3)} ;dwell", kind="dwell", layer=li))
                     out.append(self._xy_line(m, li, mi, extr=False, coast=emit.coast,
@@ -324,6 +331,17 @@ class PlanetCNCWriter:
                         out.append(GLine(
                             f"G1\t{axis_letter}[#<{axis_var}> -{_fmt(s.flow_end_retract,4)}] ;flow end",
                             kind="dwell", layer=li))
+
+                # safe-height hop down after a travel
+                if is_travel and s.travel_lift > 0:
+                    out.append(GLine(f"G1\tZ[#<_z> -{_fmt(s.travel_lift,4)}]\tF{_fmt(s.z_speed,0)} ;safe down",
+                                     kind="layer", layer=li))
+                # end dwell: after the coast + retract, once flow has stopped
+                if emit.stroke_end and s.end_dwell > 0:
+                    if s.drive == DriveMode.PNEUMATIC and valve_open:
+                        out.append(GLine(f"M63 P{valve_p} Q10000 E0", kind="valve", layer=li))
+                        valve_open = False
+                    out.append(GLine(f"G4\tP{_fmt(s.end_dwell,3)} ;end dwell", kind="dwell", layer=li))
             if s.drive == DriveMode.PNEUMATIC and valve_open:
                 out.append(GLine(f"M63 P{active} Q10000 E0", kind="valve", layer=li))
             # relative Z rise to the *next* layer: use the gap between this
@@ -441,6 +459,11 @@ class MarlinWriter:
                     out.append(GLine(f"T{tool - 1} ; extruder {tool}",
                                      kind="toolchange", layer=li))
                     active = tool
+                is_travel = (not m.extrude) and not emit.coast
+                if is_travel and s.travel_lift > 0:
+                    out.append(GLine(
+                        f"G1 Z{_fmt(lt.z + s.travel_lift,3)} F{_fmt(s.z_speed,0)} ; safe up",
+                        kind="layer", layer=li))
                 if emit.stroke_start and s.start_dwell > 0:
                     out.append(GLine(f"G4 S{_fmt(s.start_dwell,3)} ; dwell", kind="dwell", layer=li))
                 if m.extrude:
@@ -458,6 +481,11 @@ class MarlinWriter:
                     out.append(GLine(
                         f"G0 X{_fmt(m.end[0])} Y{_fmt(m.end[1])} F{_fmt(s.travel_speed,0)}",
                         kind="travel", layer=li, move=mi))
+                if is_travel and s.travel_lift > 0:
+                    out.append(GLine(f"G1 Z{_fmt(lt.z,3)} F{_fmt(s.z_speed,0)} ; safe down",
+                                     kind="layer", layer=li))
+                if emit.stroke_end and s.end_dwell > 0:
+                    out.append(GLine(f"G4 S{_fmt(s.end_dwell,3)} ; end dwell", kind="dwell", layer=li))
             out.append(GLine("", kind="blank"))
 
         if s.tool_change_enabled and active != 1:
@@ -529,6 +557,7 @@ class TemplateWriter:
                                       offx=_fmt(ox, 4), offy=_fmt(oy, 4)),
                                  "toolchange", layer=li)
                     active = tool
+                is_travel = (not m.extrude) and not emit.coast
                 if m.extrude:
                     if not valve_open and t.extruder_on:
                         out += _wrap(fill(t.extruder_on, tool=active), "valve", layer=li)
@@ -545,11 +574,23 @@ class TemplateWriter:
                     if valve_open and t.extruder_off:
                         out += _wrap(fill(t.extruder_off, tool=active), "valve", layer=li)
                         valve_open = False
+                    if is_travel and s.travel_lift > 0:
+                        out += _wrap(fill(t.hop_up, z=_fmt(lt.z, 3),
+                                          zup=_fmt(lt.z + s.travel_lift, 3),
+                                          hop=_fmt(s.travel_lift, 4), f=_fmt(s.z_speed, 0)),
+                                     "layer", layer=li)
                     # coast finishes the stroke at print speed; travel repositions
                     f = s.print_speed if emit.coast else s.travel_speed
                     out += _wrap(fill(t.travel, x=_fmt(m.end[0]), y=_fmt(m.end[1]),
                                       f=_fmt(f, 0)),
                                  "coast" if emit.coast else "travel", layer=li, move=mi)
+                    if is_travel and s.travel_lift > 0:
+                        out += _wrap(fill(t.hop_down, z=_fmt(lt.z, 3),
+                                          zup=_fmt(lt.z + s.travel_lift, 3),
+                                          hop=_fmt(s.travel_lift, 4), f=_fmt(s.z_speed, 0)),
+                                     "layer", layer=li)
+                if emit.stroke_end and s.end_dwell > 0:
+                    out += _wrap(fill(t.dwell, sec=_fmt(s.end_dwell, 3)), "dwell", layer=li)
             if valve_open and t.extruder_off:
                 out += _wrap(fill(t.extruder_off, tool=active), "valve", layer=li)
 

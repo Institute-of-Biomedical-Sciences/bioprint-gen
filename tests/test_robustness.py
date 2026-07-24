@@ -34,6 +34,8 @@ def test_default_settings_are_valid():
     ("filament_area", 0.0),
     ("coast_distance", -1.0),
     ("start_dwell", -1.0),
+    ("end_dwell", -1.0),
+    ("travel_lift", -1.0),
     ("perimeters", -1),
 ])
 def test_bad_values_are_reported(field, value):

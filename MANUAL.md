@@ -116,20 +116,27 @@ Extrusion doesn't start or stop instantly. This panel compensates:
 | **Start ramp** | *Metered/piston only.* Primes the extrusion axis at each stroke start, before the dwell, to get flow going. Separate from the print-start ramp. |
 | **End retract** | *Metered/piston only.* Retracts the extrusion axis at each stroke end. Balances the start ramp so it doesn't accumulate. Keep at 0 if not needed. |
 | **Start dwell** | A `G4` pause each time extrusion starts, letting material begin flowing before the nozzle moves. |
+| **End dwell** | A `G4` pause after each stroke ends — after the coast and retract, once flow has stopped — before travelling away. Independent of the coast. |
 | **Coast distance** | Extrusion turns off this many mm *before* the stroke ends; the tail is travelled at print speed so residual ooze finishes the line. |
+| **Travel lift** | *Safe height.* Before every travel between strokes the nozzle hops **up** by this amount (relative), moves in XY, then drops back down — so it never drags across freshly deposited material. 0 = no hop. |
 
 A typical metered stroke ends up as:
 
 ```
+G1  Z[#<_z> -2] ;safe down       ← drop back after the previous travel
 G1  A[#<_a> +0.03] ;flow start   ← start ramp
 G4  P2 ;dwell                    ← start dwell
 G1  X.. Y.. A[#<_a> +...]        ← extruding moves
 G1  X.. Y..                      ← coast (no extrusion)
 G1  A[#<_a> -0.02] ;flow end     ← end retract
+G4  P1 ;end dwell                ← end dwell
+G1  Z[#<_z> +2] ;safe up         ← lift for the travel to the next stroke
+G0  X.. Y.. F1600                ← travel
 ```
 
 Strokes shorter than the coast distance coast entirely (no extrusion).
-These settings only change the emitted g-code — they never re-slice.
+These settings only change the emitted g-code — they never re-slice. (On Marlin
+the hop uses absolute Z; on Planet CNC it is a relative `#<_z>` move.)
 
 ---
 

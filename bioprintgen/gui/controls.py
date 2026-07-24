@@ -387,13 +387,23 @@ class ParameterPanel(QScrollArea):
         self.start_dwell.setToolTip("Pause (G4) each time extrusion starts, to let "
                                     "material begin flowing before moving")
         f.addRow("Start dwell", self.start_dwell)
+        self.end_dwell = _dspin(0, 60, 0.0, 0.1, 2, " s")
+        self.end_dwell.setToolTip("Pause (G4) after each stroke ends (after the coast "
+                                  "and retract), to let material stop before travelling")
+        f.addRow("End dwell", self.end_dwell)
         self.coast_distance = _dspin(0, 50, 0.0, 0.1, 2)
         self.coast_distance.setToolTip("Stop extruding this far before each stroke's "
                                        "end and coast, to counter ooze/over-extrusion")
         f.addRow("Coast distance", self.coast_distance)
-        hint = QLabel("Start dwell pauses after extrusion turns on; coast turns "
-                      "extrusion off before the line end. Strokes shorter than the "
-                      "coast distance coast entirely.")
+        self.travel_lift = _dspin(0, 100, 0.0, 0.1, 2)
+        self.travel_lift.setToolTip("Safe height: hop the nozzle up by this much "
+                                    "(relative) before every travel between strokes, "
+                                    "then drop back down. 0 = no hop.")
+        f.addRow("Travel lift", self.travel_lift)
+        hint = QLabel("Start/end dwell pause when extrusion turns on/off; coast turns "
+                      "extrusion off before the line end (strokes shorter than the coast "
+                      "distance coast entirely); travel lift raises the nozzle for every "
+                      "reposition move.")
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         f.addRow(hint)
@@ -516,7 +526,7 @@ class ParameterPanel(QScrollArea):
             self.safe_z, self.zero_xy, self.settings_header, self.tool_change,
             self.ext2x, self.ext2y, self.ext3x, self.ext3y,
             self.flow_start_ramp, self.flow_end_retract, self.start_dwell,
-            self.coast_distance,
+            self.end_dwell, self.coast_distance, self.travel_lift,
         ]
         def emit(*_):                            # discard Qt's arg
             if not self._loading:
@@ -657,7 +667,9 @@ class ParameterPanel(QScrollArea):
             self.flow_start_ramp.setValue(s.flow_start_ramp)
             self.flow_end_retract.setValue(s.flow_end_retract)
             self.start_dwell.setValue(s.start_dwell)
+            self.end_dwell.setValue(s.end_dwell)
             self.coast_distance.setValue(s.coast_distance)
+            self.travel_lift.setValue(s.travel_lift)
             # tool change
             self.tool_change.setChecked(s.tool_change_enabled)
             self.ext2x.setValue(s.extruder2_offset[0])
@@ -713,7 +725,9 @@ class ParameterPanel(QScrollArea):
         s.flow_start_ramp = self.flow_start_ramp.value()
         s.flow_end_retract = self.flow_end_retract.value()
         s.start_dwell = self.start_dwell.value()
+        s.end_dwell = self.end_dwell.value()
         s.coast_distance = self.coast_distance.value()
+        s.travel_lift = self.travel_lift.value()
 
         # variable-height sections
         s.layer_sections = [LayerHeightSection(a, b, h)

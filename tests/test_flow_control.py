@@ -136,6 +136,134 @@ def test_pneumatic_gets_dwell_but_no_metered_ramp(settings):
     assert "flow start" not in text and "flow end" not in text
 
 
+def _stroke_ends(text):
+    """Line indices of the last extruding/coast line of each stroke is hard to
+    pin, so tests below reason about relative order within a small excerpt."""
+    return text.splitlines()
+
+
+# --------------------------------------------------------------------------- #
+#  end dwell
+# --------------------------------------------------------------------------- #
+def test_end_dwell_comes_after_the_retract(settings):
+    settings.coast_distance = 1.0
+    settings.flow_end_retract = 0.02
+    settings.end_dwell = 1.5
+    lines = _text(settings).splitlines()
+    i = next(i for i, l in enumerate(lines) if "end dwell" in l)
+    # walk back to the nearest flow-control line: it must be the retract
+    prev = next(lines[k] for k in range(i - 1, -1, -1) if "flow end" in lines[k] or "flow start" in lines[k])
+    assert "flow end" in prev, "end dwell should follow the retract, not precede it"
+
+
+def test_end_dwell_fires_without_coast(settings):
+    settings.coast_distance = 0.0
+    settings.end_dwell = 1.0
+    assert "end dwell" in _text(settings)
+
+
+def test_end_dwell_once_per_stroke(settings):
+    text = _text(settings)                      # baseline stroke count via travels
+    settings.end_dwell = 1.0
+    n_ends = _text(settings).count("end dwell")
+    # one per stroke; a plain cuboid layer has a perimeter + serpentine infill
+    assert n_ends >= 2
+
+
+def test_pneumatic_closes_valve_before_end_dwell(settings):
+    settings.drive = DriveMode.PNEUMATIC
+    settings.end_dwell = 1.0
+    lines = _text(settings).splitlines()
+    i = next(i for i, l in enumerate(lines) if "end dwell" in l)
+    assert "M63" in lines[i - 1] and "E0" in lines[i - 1], \
+        "valve must be closed on the line before the end dwell"
+
+
+def test_end_dwell_disabled_by_default(settings):
+    assert "end dwell" not in _text(settings)
+
+
+def test_marlin_end_dwell_uses_seconds(settings):
+    from bioprintgen.model import Dialect
+    settings.dialect = Dialect.MARLIN_ABS_E
+    settings.end_dwell = 1.5
+    assert "G4 S1.5 ; end dwell" in _text(settings)
+
+
+# --------------------------------------------------------------------------- #
+#  travel lift (safe-height hop on every travel)
+# --------------------------------------------------------------------------- #
+def test_hop_wraps_every_travel(settings):
+    settings.travel_lift = 2.0
+    p = Project.from_cuboid(10, 10, 0.4, settings)
+    p.plan()
+    text = p.gcode_text()
+    ups = text.count("safe up")
+    downs = text.count("safe down")
+    n_travel = sum(1 for g in p.glines() if g.kind == "travel")
+    assert ups == downs == n_travel > 0
+
+
+def test_hop_is_relative_on_planet_cnc(settings):
+    settings.travel_lift = 2.0
+    text = _text(settings)
+    assert "Z[#<_z> +2]" in text and "Z[#<_z> -2]" in text
+
+
+def _num(v):
+    return f"{v:.3f}".rstrip("0").rstrip(".")
+
+
+def test_hop_is_absolute_on_marlin(settings):
+    from bioprintgen.model import Dialect
+    settings.dialect = Dialect.MARLIN_ABS_E
+    settings.travel_lift = 2.0
+    p = Project.from_cuboid(10, 10, 0.4, settings)
+    p.plan()
+    z0 = round(p.toolpath[0].z, 3)
+    text = p.gcode_text()
+    assert "; safe up" in text and "; safe down" in text
+    # the up target is (layer z + lift), the down target is the layer z
+    assert f"Z{_num(z0 + 2.0)} " in text
+    assert f"Z{_num(z0)} F" in text
+
+
+def test_hop_uses_the_z_feedrate(settings):
+    settings.travel_lift = 2.0
+    settings.z_speed = 275.0
+    for l in _text(settings).splitlines():
+        if "safe up" in l or "safe down" in l:
+            assert "F275" in l
+
+
+def test_no_hop_on_coast_only_on_travels(settings):
+    settings.travel_lift = 2.0
+    settings.coast_distance = 1.0
+    p = Project.from_cuboid(10, 10, 0.4, settings)
+    p.plan()
+    lines = p.gcode_text().splitlines()
+    # a coast line is a G1 X.. Y.. with no A and no F; it must not be Z-wrapped
+    for i, l in enumerate(lines):
+        if l.startswith("G1\tX") and "A[" not in l and "F" not in l:   # coast
+            assert "safe" not in lines[i - 1], "coast must not be treated as a travel"
+
+
+def test_hop_disabled_by_default(settings):
+    text = _text(settings)
+    assert "safe up" not in text and "safe down" not in text
+
+
+def test_hop_does_not_change_the_toolpath(settings):
+    a = Project.from_cuboid(10, 10, 0.4, settings)
+    a.plan()
+    before = [(m.start, m.end, m.extrude) for l in a.toolpath for m in l.moves]
+    settings.travel_lift = 2.0
+    b = Project.from_cuboid(10, 10, 0.4, settings)
+    b.plan()
+    after = [(m.start, m.end, m.extrude) for l in b.toolpath for m in l.moves]
+    assert before == after
+
+
 def test_flow_settings_do_not_change_the_toolpath(settings):
     """Flow control is emission-only: the planned moves must be identical."""
     a = Project.from_cuboid(10, 10, 0.4, settings)

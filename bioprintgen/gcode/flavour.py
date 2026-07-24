@@ -43,7 +43,9 @@ class FlavourTemplate:
     tool_change: str = "T{tool} ; offset {offx},{offy}"
     extruder_on: str = ""
     extruder_off: str = ""
-    dwell: str = "G4 P{sec}"        # start-of-stroke pause; {sec} seconds
+    dwell: str = "G4 P{sec}"        # start/end pause; {sec} seconds
+    hop_up: str = "G1 Z{zup} F{f}"    # safe-height lift before a travel; {zup}=z+lift {z} {hop} {f}
+    hop_down: str = "G1 Z{z} F{f}"    # drop back after the travel
 
     # ---- (de)serialisation ----
     def to_dict(self) -> dict:

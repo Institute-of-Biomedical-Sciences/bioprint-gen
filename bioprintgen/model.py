@@ -119,7 +119,9 @@ class PrintSettings:
     flow_start_ramp: float = 0.0       # piston: prime the metered axis at each stroke start
     flow_end_retract: float = 0.0      # piston: retract the metered axis at each stroke end
     start_dwell: float = 0.0            # seconds to pause (G4) each time extrusion starts
+    end_dwell: float = 0.0             # seconds to pause (G4) after a stroke ends (post-retract)
     coast_distance: float = 0.0        # mm before a stroke's end to stop extruding (coast)
+    travel_lift: float = 0.0           # mm to hop up (relative) before every travel, then back down
 
     # --- start / end ---
     zero_xy_at_start: bool = True       # emit G92 X0 Y0
@@ -189,6 +191,10 @@ class PrintSettings:
             p.append("Coast distance cannot be negative.")
         if self.start_dwell < 0:
             p.append("Start dwell cannot be negative.")
+        if self.end_dwell < 0:
+            p.append("End dwell cannot be negative.")
+        if self.travel_lift < 0:
+            p.append("Travel lift cannot be negative.")
         if self.filament_area <= 0:
             p.append("Filament area must be greater than 0.")
         for i, sec in enumerate(self.layer_sections, 1):
