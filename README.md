@@ -1,12 +1,14 @@
 # BioprintGen
 
-A g-code generator for **extrusion bioprinting** with a modern PySide6 GUI.
+A g-code generator for **extrusion bioprinting**.
 
 Generate toolpaths for simple primitives (cuboids, cylinders) or import and slice
-your own **STL** meshes, choose an infill pattern, preview the result layer-by-layer,
+ **STL** meshes, choose an infill pattern, preview the result layer-by-layer,
 **edit individual toolpath vertices by drag-and-drop**, and export g-code in either a
-**Planet CNC**-compatible dialect (matching the Vitaprint reference machine) or a
+**Planet CNC**-compatible dialect (matching the [Vitaprint bioprinting system](https://github.com/Institute-of-Biomedical-Sciences/vitaprint-gcode-generator)) or a
 generic **Marlin** flavor with absolute E.
+
+For questions and suggestions, contact bostjan.vihar@um.si
 
 ---
 
