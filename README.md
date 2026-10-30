@@ -26,6 +26,14 @@ settings that apply to the current selection (see `MANUAL.md` §1–2).
     concave gaps are bridged by a (non-extruding) travel rather than filled
   - Rectilinear **separate bars** — individual parallel strands
   - **Gyroid** — true zero-isocontour of the gyroid field, sampled at each layer's Z
+  - **Your own patterns** in the `patterns/` folder — shipped: Schwarz P, Schwarz D,
+    Neovius, Lidinoid, I-WP (equations), Concentric and Honeycomb (Python plugins):
+    - *equation patterns*: a JSON file with `f(x, y, z)`; the strand follows
+      `f = level` like the gyroid. Equations are parsed against a whitelist, never
+      executed, and their line density is measured on load so **Infill %** just works
+    - *path plugins*: a `.py` file with `generate(region, layer, settings, spacing)`
+      returning strokes; the app clips them to the part, orders them and adds flow
+      control. Documented templates in `patterns/templates/`
   - Rectilinear patterns have an adjustable base angle and **layer rotation**
     (default **90°**, the classic woodpile)
 - **Infill density as spacing or %** — enter the strand spacing / gyroid period
@@ -70,8 +78,10 @@ settings that apply to the current selection (see `MANUAL.md` §1–2).
   (plus one machine-readable `BIOPRINTGEN_JSON` line), so a print can be reproduced or
   re-imported later.
 - **Custom g-code flavours** — define per-action templates (travel, extrude, layer
-  change, tool change, dwell, travel hop, …) with placeholders, saved to disk and
-  importable/exportable.
+  change, tool change, dwell, travel hop, …) with placeholders and `{?condition:…}`
+  blocks, saved in the app's `flavours/` folder and importable/exportable. Start from
+  the shipped **Planet CNC** or **Marlin** template — both reproduce the built-in
+  writers byte-for-byte (enforced by tests).
 - **Live preview** with a layer slider (plus **◀ / ▶ single-step buttons**), pan/zoom,
   and colour-coded moves (perimeter / infill / travel). Extrude colours also encode the
   **active extruder** so tool changes are visible.
@@ -135,7 +145,9 @@ Instead of running the file from command line on Windows, you can also use the b
 A regression suite covers the g-code-correctness invariants (feedrates, relative Z
 rises across variable-height sections, hole-free infill, tool-change offsets and
 mechanism switching, flow-control arithmetic, infill-% density, the rotating layer
-start, export → import round-tripping, which settings are shown per selection). It runs
+start, export → import round-tripping, which settings are shown per selection, the
+flavour templates reproducing the built-in writers byte-for-byte, user patterns
+hitting the requested infill % and staying inside the part, and equation safety). It runs
 headless anywhere in a few seconds.
 
 ```bash
@@ -179,12 +191,22 @@ A portable flavor for FFF-style firmware:
 
 ### Custom flavours
 
-Define your own dialect as a set of small `str.format` templates — one per common
-action (`header`, `layer_change`, `travel`, `extrude`, `tool_change`, `extruder_on/off`,
-`footer`). Placeholders like `{x} {y} {e} {f} {z} {layer} {tool} {offx} {offy}` are filled
-in per move; a blank template emits nothing. Manage them via **Manage flavours…** in the
-panel — saved flavours live under `~/.bioprintgen/flavours` (override with the
-`BIOPRINTGEN_FLAVOURS` environment variable) and can be imported/exported as JSON.
+Define your own dialect as a set of small `str.format` templates — one per writer event
+(`header`, `setup`, `layer_change`, `layer_end`, `travel`, `extrude`, `coast`,
+`extruder_on/off`, `stroke_start/end`, `dwell`, `end_dwell`, `hop_up/down`,
+`tool_leave/enter`, `footer`, `trailer`). Placeholders like
+`{x} {y} {e} {da} {f} {z} {rise} {tool} {port} {axis}` are filled in per move, and
+`{?cond:text}` blocks emit *text* only when a condition holds (`{?pneumatic:…}`,
+`{?!zero_xy:…}`, `{?piston&ramp:…}`); a blank template emits nothing. The **Syntax…**
+button in the editor lists every placeholder and condition.
+
+Manage them via **Manage flavours…** → **New from…** *Blank*, *Planet CNC (template)* or
+*Marlin (template)*. The two templates ship in `flavours/templates/` and reproduce the
+built-in writers byte-for-byte (`tests/test_flavour_templates.py`), so a copy is a safe
+starting point for a modified printer. Saved flavours live in `flavours/` next to the app
+(override with the `BIOPRINTGEN_FLAVOURS` environment variable; flavours from the old
+`~/.bioprintgen/flavours` location are copied over automatically) and can be
+imported/exported as JSON.
 
 ---
 
@@ -196,6 +218,10 @@ bioprintgen/
 ├── requirements.txt
 ├── default_settings.json       user-editable startup defaults (app only writes ui.scale)
 ├── MANUAL.md                   detailed user manual (Help → User manual)
+├── patterns/                   user infill patterns (*.json equations, *.py plugins)
+│   └── templates/              equation_template.json, path_template.py (documented)
+├── flavours/                   saved custom flavours (JSON)
+│   └── templates/              planet_cnc.json, marlin.json — byte-identical to the built-ins
 ├── bioprintgen/
 │   ├── model.py                dataclasses / enums / PrintSettings
 │   ├── pipeline.py             Project façade (from_cuboid / from_cylinder / from_stl)
@@ -206,16 +232,17 @@ bioprintgen/
 │   ├── infill/
 │   │   ├── base.py             insets, clipping, parallel line sets, layer angle
 │   │   ├── rectilinear.py      connected (serpentine) & separate bars
-│   │   └── gyroid.py           zero-isocontour extraction
+│   │   ├── gyroid.py           zero-isocontour extraction (shared by equation patterns)
+│   │   └── patterns.py         pattern registry: built-ins, equation + plugin patterns
 │   ├── planning/
 │   │   └── toolpath.py         perimeter+infill ordering, travels, rotating layer start
 │   ├── gcode/
 │   │   ├── writer.py           Planet CNC + Marlin + custom-template writers
-│   │   └── flavour.py          custom flavour templates + JSON store
+│   │   └── flavour.py          flavour template model, {?cond:…} filling, JSON store
 │   └── gui/
 │       ├── app.py              MainWindow, docks, auto-regenerate
 │       ├── controls.py         parameter panel (six collapsible panels, hides inapplicable rows)
-│       ├── flavourdialog.py    custom flavour editor (save / import / export)
+│       ├── flavourdialog.py    flavour editor (new from template / save / import / export)
 │       ├── preview2d.py        editable QGraphicsScene (drag / add / remove vertices)
 │       ├── sideview.py         non-editable X–Z elevation of the layer stack
 │       ├── codeview.py         line-numbered g-code view

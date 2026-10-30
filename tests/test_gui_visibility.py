@@ -274,3 +274,112 @@ def test_panel_scaled_sizes_grow(app):
     p.apply_scaled_sizes()
     assert p.start_gcode.maximumHeight() > small
     theme.set_scale(1.0)
+
+
+# --------------------------------------------------------------------------- #
+#  Flavour editor
+# --------------------------------------------------------------------------- #
+def test_flavour_dialog_starts_from_a_template_and_saves_a_copy(app, tmp_path, monkeypatch):
+    """Template -> editor form -> saved flavour must keep every character
+    (tabs, multi-line blocks), so the copy still matches the built-in writer."""
+    monkeypatch.setenv("BIOPRINTGEN_FLAVOURS", str(tmp_path))
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    from bioprintgen.gcode import flavour as fl
+    from bioprintgen.gui.flavourdialog import FlavourDialog
+    dlg = FlavourDialog()
+    names = [a.text() for a in dlg.new_menu.actions()]
+    assert "Blank" in names and "Planet CNC (template)" in names and "Marlin (template)" in names
+    tpl = fl.list_templates()["Planet CNC (template)"]
+    next(a for a in dlg.new_menu.actions() if a.text() == tpl.name).trigger()
+    assert dlg.name_edit.text() == "Planet CNC (custom)"
+    dlg._save()
+    saved = fl.list_flavours()["Planet CNC (custom)"]
+    assert {k: v for k, v in saved.to_dict().items() if k != "name"} == \
+           {k: v for k, v in tpl.to_dict().items() if k != "name"}
+    assert not (fl.templates_dir() / "Planet CNC (custom).json").exists()
+
+
+def test_custom_flavour_keeps_the_drive_settings(panel, tmp_path, monkeypatch):
+    """Templates read drive / ramp / valve values, so a custom flavour shows them."""
+    monkeypatch.setenv("BIOPRINTGEN_FLAVOURS", str(tmp_path))
+    from bioprintgen.gcode import flavour as fl
+    fl.save_flavour(fl.list_templates()["Planet CNC (template)"])
+    panel._refresh_flavours(select_name="Planet CNC (template)")
+    assert panel.dialect.currentText() == "Custom: Planet CNC (template)"
+    panel.drive.setCurrentIndex(0)
+    for w, name in ((panel.drive, "drive"), (panel.ramp, "ramp"), (panel.ext10, "piston flow")):
+        assert_row(w, True, f"custom {name}")
+
+
+# --------------------------------------------------------------------------- #
+#  User infill patterns
+# --------------------------------------------------------------------------- #
+def _select_pattern(panel, pid):
+    panel.infill.setCurrentIndex(panel._pattern_ids.index(pid))
+
+
+def test_equation_pattern_behaves_like_the_gyroid(panel):
+    panel.infill_mode.setCurrentIndex(0)
+    _select_pattern(panel, "schwarz_p")
+    assert_row(panel.gyroid_period, True, "equation period")
+    assert_row(panel.spacing, False, "equation spacing")
+    assert_row(panel.infill_angle, False, "equation base angle")
+    assert _label_of(panel.gyroid_period).text() == "Schwarz P period"
+    assert panel.build_settings().infill_type == "schwarz_p"
+
+
+def test_path_plugin_uses_spacing_and_angle(panel):
+    panel.infill_mode.setCurrentIndex(0)
+    _select_pattern(panel, "honeycomb")
+    assert_row(panel.spacing, True, "plugin spacing")
+    assert_row(panel.infill_angle, True, "plugin base angle")
+    assert_row(panel.gyroid_period, False, "plugin period")
+
+
+def test_sections_list_user_patterns_too(panel):
+    from PySide6.QtWidgets import QComboBox
+    panel.infill_sections._add_row()
+    cell = panel.infill_sections.table.cellWidget(0, 2)
+    assert isinstance(cell, QComboBox)
+    names = [cell.itemText(i) for i in range(cell.count())]
+    assert "Schwarz P" in names and "Honeycomb" in names
+    panel.infill_sections.set_current_cell(2, panel._pattern_ids.index("neovius"))
+    assert panel.build_settings().infill_sections[0].infill_type == "neovius"
+
+
+def test_reload_keeps_the_selection_by_id(panel):
+    _select_pattern(panel, "lidinoid")
+    panel.infill_sections._add_row((0.0, 1.0, panel._pattern_ids.index("iwp"), 0.0))
+    panel.reload_patterns(quiet=True)
+    s = panel.build_settings()
+    assert s.infill_type == "lidinoid" and s.infill_sections[0].infill_type == "iwp"
+
+
+def test_missing_pattern_is_kept_and_reported(panel):
+    from bioprintgen.model import PrintSettings, parse_pattern
+    s = PrintSettings()
+    s.infill_type = parse_pattern("gone_pattern")
+    panel.apply_settings(s)
+    assert panel.infill.currentText() == "gone_pattern (missing)"
+    back = panel.build_settings()
+    assert back.infill_type == "gone_pattern"
+    assert any("gone_pattern" in m for m in back.validate())
+
+
+def test_pattern_embedded_in_an_import_shows_by_name(panel, tmp_path, monkeypatch):
+    from bioprintgen.infill import patterns
+    from bioprintgen import settingsio
+    from bioprintgen.model import PrintSettings, parse_pattern
+    monkeypatch.setenv("BIOPRINTGEN_PATTERNS", str(tmp_path))
+    try:
+        patterns.reload()
+        patterns.register_embedded({"emb": {"kind": "levelset", "name": "Embedded one",
+                                            "equation": "cos(x)+cos(y)+cos(z)", "level": 0}})
+        s = PrintSettings()
+        s.infill_type = parse_pattern("emb")
+        panel.apply_settings(s)
+        assert panel.infill.currentText() == "Embedded one"
+    finally:
+        monkeypatch.delenv("BIOPRINTGEN_PATTERNS")
+        patterns.reload()

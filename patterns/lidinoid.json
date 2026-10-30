@@ -1,0 +1,6 @@
+{
+  "name": "Lidinoid",
+  "description": "Lidinoid TPMS (approximation, level 0.15 built in): intricate, isotropic.",
+  "equation": "0.5*(sin(2*x)*cos(y)*sin(z) + sin(2*y)*cos(z)*sin(x) + sin(2*z)*cos(x)*sin(y)) - 0.5*(cos(2*x)*cos(2*y) + cos(2*y)*cos(2*z) + cos(2*z)*cos(2*x)) + 0.15",
+  "level": 0
+}

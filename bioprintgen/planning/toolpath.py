@@ -18,10 +18,10 @@ import math
 from typing import List, Optional, Tuple
 
 from ..model import (
-    Layer, LayerToolpath, Move, MoveKind, PrintSettings, InfillType,
+    Layer, LayerToolpath, Move, MoveKind, PrintSettings, InfillType, pattern_id,
 )
 from ..infill.base import perimeter_strokes, Stroke
-from ..infill import rectilinear, gyroid
+from ..infill import rectilinear, gyroid, patterns
 
 Point = Tuple[float, float]
 
@@ -117,8 +117,14 @@ def plan_layer(layer: Layer, settings: PrintSettings,
         infill_strokes = rectilinear.generate(inner, layer, settings, connected=True)
     elif settings.infill_type == InfillType.RECTILINEAR_SEPARATE:
         infill_strokes = rectilinear.generate(inner, layer, settings, connected=False)
-    else:
+    elif settings.infill_type == InfillType.GYROID:
         infill_strokes = gyroid.generate(inner, layer, settings)
+    else:
+        pattern = patterns.get(settings.infill_type)
+        if pattern is None:
+            raise patterns.PatternError(
+                f"infill pattern '{pattern_id(settings.infill_type)}' is not available")
+        infill_strokes = patterns.generate_user(pattern, inner, layer, settings)
 
     # 3. order and emit. Walls first, then ordered infill.  With a seed, each
     #    closed wall's seam is moved to the vertex nearest it.

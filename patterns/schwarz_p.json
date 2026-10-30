@@ -1,0 +1,6 @@
+{
+  "name": "Schwarz P",
+  "description": "Schwarz Primitive TPMS: round, well-connected pores; softer than a gyroid.",
+  "equation": "cos(x) + cos(y) + cos(z)",
+  "level": 0
+}

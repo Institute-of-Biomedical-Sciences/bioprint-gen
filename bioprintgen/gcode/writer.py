@@ -26,10 +26,10 @@ from dataclasses import dataclass, fields
 from typing import List, Optional, Tuple
 
 from ..model import (
-    LayerToolpath, Move, MoveKind, PrintSettings, Dialect, DriveMode,
+    LayerToolpath, Move, MoveKind, PrintSettings, Dialect, DriveMode, pattern_id,
 )
 from .flavour import FlavourTemplate, fill
-from ..settingsio import GCODE_JSON_MARKER, gcode_settings_payload
+from ..settingsio import GCODE_JSON_MARKER, gcode_settings_payload, used_pattern_definitions
 
 
 @dataclass
@@ -171,6 +171,8 @@ def settings_header_lines(s: PrintSettings, cp: str = ";") -> List[str]:
         if hasattr(v, "value"):          # Enum -> its value
             v = v.value
         lines.append(f"{cp} {f.name} = {v}")
+    for pid, d in used_pattern_definitions(s).items():
+        lines.append(f"{cp} pattern {pid}: {d['equation']} = {d['level']:g}  ({d['name']})")
     if s.layer_sections:
         lines.append(f"{cp} layer_sections:")
         for sec in s.layer_sections:
@@ -179,7 +181,7 @@ def settings_header_lines(s: PrintSettings, cp: str = ";") -> List[str]:
         lines.append(f"{cp} infill_sections:")
         for sec in s.infill_sections:
             lines.append(f"{cp}   infill z[{sec.z_start} .. {sec.z_end}] "
-                         f"pattern={sec.infill_type.value} percent={sec.percent}")
+                         f"pattern={pattern_id(sec.infill_type)} percent={sec.percent}")
     if s.tool_line_ranges:
         lines.append(f"{cp} tool_line_ranges (clean-baseline lines):")
         for r in s.tool_line_ranges:
@@ -247,6 +249,9 @@ class PlanetCNCWriter:
             return self.AXIS.get(extruder, ("A", "_a"))
         return self.axis_letter, self.axis_var
 
+    def _valve_port(self, active: int) -> int:
+        return active if self.s.tool_change_enabled else self.s.extruder_index
+
     # -- tool-change blocks (offset variable + G92 frame shift) --
     def _tc_open(self, e: int, li: int) -> List[GLine]:
         ox, oy = self.OFFVAR[e]
@@ -300,12 +305,13 @@ class PlanetCNCWriter:
                 tool = m.extruder if s.tool_change_enabled else 1
                 if tool != active:
                     if s.drive == DriveMode.PNEUMATIC and valve_open:
-                        out.append(GLine(f"M63 P{active} Q10000 E0", kind="valve", layer=li))
+                        out.append(GLine(f"M63 P{self._valve_port(active)} Q10000 E0",
+                                         kind="valve", layer=li))
                         valve_open = False
                     out += self._tc(active, tool, li)
                     active = tool
                 axis_letter, axis_var = self._axis_for(active)
-                valve_p = active if s.tool_change_enabled else s.extruder_index
+                valve_p = self._valve_port(active)
                 is_travel = (not m.extrude) and not emit.coast
 
                 # stop flow before any repositioning (so a hop can't ooze)
@@ -355,7 +361,10 @@ class PlanetCNCWriter:
                         valve_open = False
                     out.append(GLine(f"G4\tP{_fmt(s.end_dwell,3)} ;end dwell", kind="dwell", layer=li))
             if s.drive == DriveMode.PNEUMATIC and valve_open:
-                out.append(GLine(f"M63 P{active} Q10000 E0", kind="valve", layer=li))
+                # same port the valve was opened on (the extruder index when
+                # tool change is off, not extruder 1)
+                out.append(GLine(f"M63 P{self._valve_port(active)} Q10000 E0",
+                                 kind="valve", layer=li))
             # relative Z rise to the *next* layer: use the gap between this
             # layer's z and the next one's so it stays correct across variable-
             # height section boundaries (the next layer's height, not this one's).
@@ -527,6 +536,13 @@ class MarlinWriter:
 #  Custom template flavour
 # --------------------------------------------------------------------------- #
 class TemplateWriter:
+    """Drives a `FlavourTemplate` through the same sequence of events as the
+    built-in writers (see flavour.REFERENCE for the order), so a template can
+    reproduce either of them exactly - the shipped planet_cnc.json and
+    marlin.json do, and tests hold them to it."""
+
+    AXIS = PlanetCNCWriter.AXIS
+
     def __init__(self, settings: PrintSettings):
         self.s = settings
         self.t: FlavourTemplate = settings.custom_flavour or FlavourTemplate()
@@ -540,77 +556,150 @@ class TemplateWriter:
         h = layer_height if layer_height > 0 else s.layer_height
         return m.length * s.line_width * h / area
 
+    # -- per-tool values --
+    def _port(self, tool: int) -> int:
+        return tool if self.s.tool_change_enabled else self.s.extruder_index
+
+    def _axis(self, tool: int) -> Tuple[str, str]:
+        key = tool if self.s.tool_change_enabled else self.s.extruder_index
+        return self.AXIS.get(key, ("A", "_a"))
+
+    def _tool_values(self, tool: int) -> dict:
+        ox, oy = self.s.offset_for_extruder(tool)
+        ax, av = self._axis(tool)
+        return dict(tool=tool, tool0=tool - 1, offx=_fmt(ox, 4), offy=_fmt(oy, 4),
+                    offx_var=98 + 2 * tool, offy_var=99 + 2 * tool,
+                    port=self._port(tool), axis=ax, axisvar=av)
+
+    def _globals(self, layers: List[LayerToolpath]):
+        s, t = self.s, self.t
+        zmax = layers[-1].z if layers else 0.0
+        first_z = layers[0].z if layers else 0.0
+        ax, av = self.AXIS.get(s.extruder_index, ("A", "_a"))
+        (e2x, e2y), (e3x, e3y) = s.extruder2_offset, s.extruder3_offset
+        values = dict(
+            name=t.name, layer_count=len(layers), first_z=_fmt(first_z, 3),
+            z_max=_fmt(zmax, 3), safe_z=_fmt(zmax + s.safe_z, 3),
+            safe_hop=_fmt(s.safe_z, 3),
+            f_print=_fmt(s.print_speed, 0), f_travel=_fmt(s.travel_speed, 0),
+            f_z=_fmt(s.z_speed, 0), hop=_fmt(s.travel_lift, 4),
+            ramp=_fmt(s.ramp, 4), start_ramp=_fmt(s.flow_start_ramp, 4),
+            end_retract=_fmt(s.flow_end_retract, 4), valve=_fmt(s.valve_value * 10, 3),
+            e2x=_fmt(e2x, 4), e2y=_fmt(e2y, 4), e3x=_fmt(e3x, 4), e3y=_fmt(e3y, 4),
+            axis=ax, axisvar=av, port=self._port(1), tool=1, tool0=0)
+        conditions = dict(
+            piston=s.drive == DriveMode.PISTON, pneumatic=s.drive == DriveMode.PNEUMATIC,
+            tool_change=s.tool_change_enabled, zero_xy=s.zero_xy_at_start,
+            flow_control=s.flow_control, ramp=bool(s.ramp),
+            start_ramp=s.flow_start_ramp > 0, end_retract=s.flow_end_retract > 0,
+            start_dwell=s.start_dwell > 0, end_dwell=s.end_dwell > 0,
+            travel_lift=s.travel_lift > 0)
+        return values, conditions
+
+    def _do(self, action: str, kind: str, li=None, mi=None,
+            when: Optional[dict] = None, **values) -> List[GLine]:
+        v = dict(self._values)
+        v.update(values)
+        c = dict(self._conditions)
+        if when:
+            c.update(when)
+        return _wrap(fill(getattr(self.t, action), c, **v), kind, layer=li, move=mi)
+
+    def _switch(self, prev: int, new: int, li: int, final: bool) -> List[GLine]:
+        out = self._do("tool_leave", "toolchange", li,
+                       when=dict(reference=prev == 1, final=final), **self._tool_values(prev))
+        when = dict(reference=new == 1, final=final)
+        out += self._do("tool_enter", "toolchange", li, when=when, **self._tool_values(new))
+        out += self._do("tool_change", "toolchange", li, when=when, prev=prev,
+                        **self._tool_values(new))
+        return out
+
     def write(self, layers: List[LayerToolpath]) -> List[GLine]:
         s, t = self.s, self.t
         cp = t.comment_prefix or ";"
         self.e = 0.0
+        self._values, self._conditions = self._globals(layers)
+        do = self._do
+        f_z, f_print = _fmt(s.z_speed, 0), _fmt(s.print_speed, 0)
         out: List[GLine] = []
-        first_z = layers[0].z if layers else 0.0
-        out += _wrap(fill(t.header, name=t.name, layer_count=len(layers),
-                          first_z=_fmt(first_z, 3)), "header")
+        out += do("header", "header")
         out += _preamble(s, cp, layers)
+        out += do("setup", "header")
 
         active = 1
         for li, lt in enumerate(layers):
-            out += _wrap(fill(t.layer_change, layer=lt.index, z=_fmt(lt.z, 3),
-                              height=_fmt(lt.height, 4), f=_fmt(s.z_speed, 0)),
-                         "layer", layer=li)
+            lv = dict(layer=lt.index, z=_fmt(lt.z, 3), height=_fmt(lt.height, 4))
+            lw = dict(first_layer=li == 0, last_layer=li == len(layers) - 1)
+            out += do("layer_change", "layer", li, when=lw, f=f_z, **lv)
 
             valve_open = False
             for emit in flow_emits(lt, s):
                 mi, m = emit.mi, emit.move
                 tool = m.extruder if s.tool_change_enabled else 1
                 if tool != active:
-                    if valve_open and t.extruder_off:
-                        out += _wrap(fill(t.extruder_off, tool=active), "valve", layer=li)
+                    if valve_open:
+                        out += do("extruder_off", "valve", li, when=lw,
+                                  **self._tool_values(active))
                         valve_open = False
-                    ox, oy = s.offset_for_extruder(tool)
-                    out += _wrap(fill(t.tool_change, tool=tool,
-                                      offx=_fmt(ox, 4), offy=_fmt(oy, 4)),
-                                 "toolchange", layer=li)
+                    out += self._switch(active, tool, li, final=False)
                     active = tool
+                mv = dict(lv, **self._tool_values(active))
+                mw = dict(lw, stroke_start=emit.stroke_start, stroke_end=emit.stroke_end)
                 is_travel = (not m.extrude) and not emit.coast
+                hop = dict(zup=_fmt(lt.z + s.travel_lift, 3), f=f_z)
+
+                if not m.extrude and valve_open:
+                    out += do("extruder_off", "valve", li, when=mw, **mv)
+                    valve_open = False
+                if is_travel and s.travel_lift > 0:
+                    out += do("hop_up", "layer", li, when=mw, **mv, **hop)
+                if m.extrude and not valve_open and t.extruder_on:
+                    out += do("extruder_on", "valve", li, when=mw, **mv)
+                    valve_open = True
+                if emit.stroke_start:
+                    out += do("stroke_start", "dwell", li, when=mw, **mv)
+                    if s.start_dwell > 0:
+                        out += do("dwell", "dwell", li, when=mw,
+                                  sec=_fmt(s.start_dwell, 3), **mv)
+
+                xy = dict(x=_fmt(m.end[0]), y=_fmt(m.end[1]), length=_fmt(m.length))
                 if m.extrude:
-                    if not valve_open and t.extruder_on:
-                        out += _wrap(fill(t.extruder_on, tool=active), "valve", layer=li)
-                        valve_open = True
-                    if emit.stroke_start and s.start_dwell > 0:
-                        out += _wrap(fill(t.dwell, sec=_fmt(s.start_dwell, 3)), "dwell", layer=li)
                     de = self._e_delta(m, lt.height)
                     self.e += de
-                    out += _wrap(fill(t.extrude, x=_fmt(m.end[0]), y=_fmt(m.end[1]),
-                                      e=_fmt(self.e, 5), de=_fmt(de, 5),
-                                      f=_fmt(s.print_speed, 0), length=_fmt(m.length)),
-                                 "move", layer=li, move=mi)
+                    da = m.length / 10.0 * s.ext_per_10mm
+                    out += do("extrude", "move", li, mi, when=mw, e=_fmt(self.e, 5),
+                              de=_fmt(de, 5), da=_fmt(da, 5), f=f_print, **mv, **xy)
+                elif emit.coast:
+                    # finish the stroke without extruding, at print speed
+                    out += do("coast" if t.coast else "travel", "coast", li, mi,
+                              when=mw, f=f_print, **mv, **xy)
                 else:
-                    if valve_open and t.extruder_off:
-                        out += _wrap(fill(t.extruder_off, tool=active), "valve", layer=li)
-                        valve_open = False
-                    if is_travel and s.travel_lift > 0:
-                        out += _wrap(fill(t.hop_up, z=_fmt(lt.z, 3),
-                                          zup=_fmt(lt.z + s.travel_lift, 3),
-                                          hop=_fmt(s.travel_lift, 4), f=_fmt(s.z_speed, 0)),
-                                     "layer", layer=li)
-                    # coast finishes the stroke at print speed; travel repositions
-                    f = s.print_speed if emit.coast else s.travel_speed
-                    out += _wrap(fill(t.travel, x=_fmt(m.end[0]), y=_fmt(m.end[1]),
-                                      f=_fmt(f, 0)),
-                                 "coast" if emit.coast else "travel", layer=li, move=mi)
-                    if is_travel and s.travel_lift > 0:
-                        out += _wrap(fill(t.hop_down, z=_fmt(lt.z, 3),
-                                          zup=_fmt(lt.z + s.travel_lift, 3),
-                                          hop=_fmt(s.travel_lift, 4), f=_fmt(s.z_speed, 0)),
-                                     "layer", layer=li)
+                    out += do("travel", "travel", li, mi, when=mw,
+                              f=_fmt(s.travel_speed, 0), **mv, **xy)
+
+                if emit.stroke_end:
+                    out += do("stroke_end", "dwell", li, when=mw, **mv)
+                if is_travel and s.travel_lift > 0:
+                    out += do("hop_down", "layer", li, when=mw, **mv, **hop)
                 if emit.stroke_end and s.end_dwell > 0:
-                    out += _wrap(fill(t.dwell, sec=_fmt(s.end_dwell, 3)), "dwell", layer=li)
-            if valve_open and t.extruder_off:
-                out += _wrap(fill(t.extruder_off, tool=active), "valve", layer=li)
+                    if valve_open:
+                        out += do("extruder_off", "valve", li, when=mw, **mv)
+                        valve_open = False
+                    out += do("end_dwell" if t.end_dwell else "dwell", "dwell", li,
+                              when=mw, sec=_fmt(s.end_dwell, 3), **mv)
+            if valve_open:
+                out += do("extruder_off", "valve", li, when=lw, **self._tool_values(active))
+            # same relative rise as the built-in writer: the gap to the next layer
+            rise = layers[li + 1].z - lt.z if li + 1 < len(layers) else lt.height
+            out += do("layer_end", "layer", li, when=lw, rise=_fmt(rise, 4), f=f_z, **lv)
+
+        if s.tool_change_enabled and active != 1:
+            out += self._switch(active, 1, len(layers) - 1, final=True)
 
         out += _postamble(s, cp)
-        zmax = layers[-1].z if layers else 0.0
-        out += _wrap(fill(t.footer, name=t.name, z_max=_fmt(zmax, 3),
-                          safe_z=_fmt(zmax + s.safe_z, 3)), "footer")
+        out += do("footer", "footer")
         out += _settings_tail(s, cp)
+        out += do("trailer", "footer")
         return out
 
 

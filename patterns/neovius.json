@@ -1,0 +1,6 @@
+{
+  "name": "Neovius",
+  "description": "Neovius TPMS: larger cavities joined by narrow necks.",
+  "equation": "3*(cos(x) + cos(y) + cos(z)) + 4*cos(x)*cos(y)*cos(z)",
+  "level": 0
+}

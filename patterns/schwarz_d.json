@@ -1,0 +1,6 @@
+{
+  "name": "Schwarz D (diamond)",
+  "description": "Diamond TPMS: stiff, small interconnected channels.",
+  "equation": "sin(x)*sin(y)*sin(z) + sin(x)*cos(y)*cos(z) + cos(x)*sin(y)*cos(z) + cos(x)*cos(y)*sin(z)",
+  "level": 0
+}

@@ -29,12 +29,12 @@ current selection actually uses:
 | Cuboid | Diameter, STL picker |
 | Cylinder | Width X, Depth Y, STL picker |
 | STL file | Width, Depth, Diameter, Height (the mesh supplies them) |
-| Infill defined by *strand spacing* | Infill % (and Gyroid period for rectilinear, Strand spacing for gyroid) |
-| Infill defined by *%* | Strand spacing, Gyroid period (both are derived; the value is shown underneath) |
-| Gyroid infill | Base angle, Layer rotation |
+| Infill defined by *strand spacing* | Infill % (and Period for rectilinear / plugin patterns, Strand spacing for gyroid / equation patterns) |
+| Infill defined by *%* | Strand spacing, Period (both are derived; the value is shown underneath) |
+| Gyroid or equation pattern | Base angle, Layer rotation |
 | Pneumatic drive | Piston ink flow, Ramp / retract, Start ramp, End retract, Live flow control |
 | Piston drive | Pneumatic ink flow (bar) |
-| Marlin / custom flavour | Drive, Extruder, both ink-flow fields, Ramp / retract, Start ramp, End retract, Live flow control |
+| Marlin | Drive, Extruder, both ink-flow fields, Ramp / retract, Start ramp, End retract, Live flow control |
 | Tool change on | Extruder (chosen per move instead) |
 | Tool change off | Extruder offsets, the ranges table, the selection buttons |
 
@@ -60,7 +60,7 @@ restored next run.
 | --- | --- |
 | **Printer** | Drive · Extruder · Nozzle diameter · G-code flavour · Manage flavours… |
 | **Design** | Shape · Width X · Depth Y · Diameter · Height Z · Choose STL file… |
-| **Layers** | General layer height · First layer height · variable-height table · Infill pattern · Infill defined by · Strand spacing *or* Gyroid period *or* Infill % · Base angle · Layer rotation · infill-sections table · Perimeters · Rotate layer start point |
+| **Layers** | General layer height · First layer height · variable-height table · Infill pattern + Patterns… · Infill defined by · Strand spacing *or* Period *or* Infill % · Base angle · Layer rotation · infill-sections table · Perimeters · Rotate layer start point |
 | **Extrusion** | Ink flow · Ramp / retract · Start ramp · End retract · Start dwell · End dwell · Coast distance |
 | **Printing process** | Printing speed · Travel speed · Layer change speed · Travel safe height · Final safe height · Enable tool change + offsets · extruder range table · Set XY = 0 at current position |
 | **Advanced options** | Write settings as comment block · Live flow control (jogpot) · Start g-code · End g-code |
@@ -152,12 +152,15 @@ you asked for.
 
 **Infill pattern:** *Rectilinear – connected* (one serpentine strand where the
 geometry allows; it never extrudes across a hole), *Rectilinear – separate bars*
-(every strand on its own), or *Gyroid*.
+(every strand on its own), *Gyroid*, or one of the patterns in the `patterns/`
+folder (see *Your own infill patterns* below). Hover over a pattern for a short
+description.
 
 **Infill defined by** chooses how density is entered:
 
 - **Strand spacing** — the centre-to-centre distance between strands (rectilinear),
-  or the cell size **Gyroid period** (gyroid), exactly as before.
+  or the cell size **Period** (gyroid and equation patterns; the field is named
+  after the pattern, e.g. *Schwarz P period*).
 - **Infill %** — the fraction of each layer's area covered by lines, worked out
   from the **Nozzle diameter**. 100 % means the lines touch. The resulting
   spacing / period is shown under the field.
@@ -166,10 +169,66 @@ geometry allows; it never extrudes across a hole), *Rectilinear – separate bar
   - Gyroid: `period = 2.494 × nozzle diameter ÷ (% / 100)`. The constant was
     measured on the generator itself, so a given % deposits the same area fraction
     for gyroid as for rectilinear (checked to within 5 %).
+  - Equation patterns: the same formula with their own constant, measured
+    automatically when the pattern loads (Schwarz P ≈ 1.88, Schwarz D ≈ 3.01, …).
+  - Path plugins receive the derived spacing and are written to honour it.
 
 **Base angle** / **Layer rotation** set the strand direction of layer 0 and how
 much it turns each layer (90° gives the classic woodpile). They don't apply to
-gyroid.
+gyroid or equation patterns (plugins may use them — Honeycomb turns its grid by the
+base angle).
+
+### Your own infill patterns
+
+**Patterns…** next to the pattern list opens the **patterns folder**, the
+**templates folder**, or **reloads** the patterns (after you add or edit a file —
+the dialog lists what loaded and why anything didn't). The file name is the
+pattern's id (`my_cells.json` → `my_cells`), which is what settings and exported
+files store.
+
+**Equation patterns** (`*.json`, start from `templates/equation_template.json`):
+
+```json
+{"name": "Schwarz P", "description": "…", "equation": "cos(x) + cos(y) + cos(z)", "level": 0}
+```
+
+- The strand follows the curve `f(x, y, z) = level` at each layer's height —
+  exactly how the gyroid works. Shipped: Schwarz P, Schwarz D, Neovius, Lidinoid,
+  I-WP.
+- `x, y, z` are scaled so that `2π` is one **Period** (the cell size you set), so
+  `f` must repeat every `2π` along each axis — true of the standard TPMS formulas.
+- Allowed: numbers, `x y z pi e tau`, `+ - * / ** ^ %` and `sin cos tan asin acos
+  atan atan2 sinh cosh tanh exp log sqrt abs sign floor min max`. The equation is
+  parsed against that list and never run as code.
+- `level` shifts the curve: a small non-zero level thickens one side of a TPMS
+  (graded porosity). A level outside `f`'s range has no curves and is reported.
+- **Infill %** works with no extra effort: the line density of the curve is
+  measured when it loads.
+- An export **embeds the equation** in its settings block, so **Import g-code**
+  can rebuild the print on a computer that doesn't have the pattern file (it is
+  added for that session).
+
+**Path plugins** (`*.py`, start from `templates/path_template.py`) draw strokes
+directly — for patterns that are not a single equation (Concentric and Honeycomb
+ship as examples):
+
+```python
+PATTERN = {"name": "My pattern", "description": "…"}
+
+def generate(region, layer, settings, spacing):
+    return [[(x0, y0), (x1, y1), …], …]      # each list = one continuous strand
+```
+
+- `region` is where strand centre lines may go (a shapely polygon, already inside
+  the walls); `spacing` is the strand centre distance, already derived from
+  **Infill %** — draw about `1/spacing` mm of strand per mm² and % means the
+  same as for rectilinear.
+- The app clips every stroke to the part (overshooting is fine), orders the
+  strokes, and adds travels, safe-height hops and flow control.
+- If a plugin raises an error, generation stops and the status bar names the
+  pattern and the layer. Plugins are ordinary Python: only use ones you trust.
+- Prefer few long strokes (every stroke is a flow start/stop) and avoid strokes
+  crossing each other within a layer.
 
 ### Infill sections (different infill per height band)
 
@@ -287,11 +346,43 @@ section gives both halves the same tool.
 ## 8. G-code flavours
 
 Pick one under **Printer → G-code flavour**. Beyond the built-in **Planet CNC** and
-**Marlin**, you can define your own via **Manage flavours…**: per-action
-templates (header, layer change, travel, extrude, tool change, extruder on/off,
-dwell, travel hop, footer) with placeholders such as
-`{x} {y} {e} {f} {z} {layer} {tool}`. Blank template = emit nothing. Flavours are
-stored as JSON under `~/.bioprintgen/flavours` and can be imported/exported.
+**Marlin**, you can define your own via **Manage flavours…**.
+
+**Start from a template.** **New from…** offers *Blank*, *Planet CNC (template)* and
+*Marlin (template)*. The two templates reproduce the built-in writers exactly — the
+same file, byte for byte, for every drive, flow-control and tool-change setting (the
+only difference is the settings block, which names the flavour). Pick one, rename it,
+change what your printer needs, **Save**. Templates themselves are never overwritten.
+
+**Actions.** Each box is the text emitted for one event, in this order:
+
+| Group | Actions |
+| --- | --- |
+| File | Header → *(start g-code)* → Setup … Footer *(after end g-code)* → *(settings block)* → Trailer |
+| Layers | Layer start, Layer end (`{rise}` = gap to the next layer) |
+| Moves | Travel, Extrude, Coast (blank: uses Travel at print speed) |
+| Flow | Extruder/valve on & off, Stroke start & end, Start dwell, End dwell |
+| Travel safe height | Up, Down |
+| Tool change | Leave extruder, Enter extruder, Tool change |
+
+**Placeholders** — `{x} {y} {e} {de} {da} {length} {f}` in moves, `{layer} {z}
+{height} {rise}` in layers, `{tool} {tool0} {port} {axis} {axisvar} {offx} {offy}`
+for the extruder, plus globals such as `{f_print} {f_travel} {f_z} {ramp} {valve}
+{hop} {safe_z} {e2x}`. Unknown placeholders are left as typed.
+
+**Conditions** — `{?cond:text}` emits *text* only when *cond* holds, `{?!cond:…}`
+when it does not, `{?a&b:…}` when both do. Blocks can nest and span lines; a line left
+empty by a skipped block disappears. Conditions include `piston`, `pneumatic`,
+`tool_change`, `zero_xy`, `flow_control`, `ramp`, `start_dwell`, `travel_lift`,
+`stroke_start`, `first_layer`, `reference` and `final`. Use `{blank}` for an action
+that should emit one empty line. **Syntax…** in the editor shows the full list.
+
+Because templates read the drive, ramp and ink-flow values, those fields stay
+visible when a custom flavour is selected (they are hidden only for Marlin).
+
+Flavours are stored as JSON in the app's `flavours/` folder (templates in
+`flavours/templates/`) and can be imported/exported. Multi-line actions are saved as
+lists of lines, so the files are easy to read and edit by hand.
 
 ---
 
@@ -375,8 +466,10 @@ from the toolbar zoom — leaving everything else as you wrote it.
   keys not shown in the panel: `gcode_line_ending` (`"crlf"` / `"lf"`),
   `filament_area` (Marlin E scaling), `minimize_crossings`. Also:
   `infill_mode` (`"spacing"` / `"percent"`), `infill_percent`, `rotate_start`,
-  `infill_sections` (rows of `[z_start, z_end, "gyroid", percent]`; pattern is
-  `"rectilinear_connected"`, `"rectilinear_separate"` or `"gyroid"`).
+  `infill_sections` (rows of `[z_start, z_end, "gyroid", percent]`). Patterns
+  (`infill_type` and in sections) are ids: `"rectilinear_connected"`,
+  `"rectilinear_separate"`, `"gyroid"`, or a file name from the `patterns/`
+  folder such as `"schwarz_p"`.
 
 ---
 
@@ -409,6 +502,15 @@ contains it.
 **Tool ranges landed in the wrong place.** Line numbers refer to the clean
 g-code. Turn the toggle *off* while reading/typing line numbers, or use the
 *Set start/end ← selection* buttons, which always resolve correctly.
+
+**My pattern isn't in the list.** Choose **Patterns… → Reload patterns**; the
+dialog says why a file didn't load (syntax error, unknown function, no curves at
+that level, an id already taken, a plugin without `generate`). Files in
+`patterns/templates/` are documentation and are never loaded.
+
+**A pattern shows as *(missing)*.** The settings (defaults file or an imported
+plugin pattern) name a pattern this computer doesn't have. Copy the file into
+`patterns/` and reload, or pick another pattern.
 
 **A value changed while I scrolled.** It shouldn't — fields ignore the wheel
 until clicked. If a field is already focused (you clicked it), the wheel does

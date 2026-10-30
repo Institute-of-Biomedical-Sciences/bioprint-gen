@@ -57,7 +57,7 @@ def test_gyroid_period_only_checked_for_gyroid():
     s.gyroid_period = 0.0
     assert s.validate() == []                 # irrelevant for rectilinear
     s.infill_type = InfillType.GYROID
-    assert any("Gyroid" in m for m in s.validate())
+    assert any("Period" in m for m in s.validate())
 
 
 # --------------------------------------------------------------------------- #

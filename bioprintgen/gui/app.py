@@ -27,6 +27,7 @@ from ..pipeline import Project
 from ..geometry import stlslicer
 from ..gcode import writer as gwriter
 from ..gcode import flavour as flavourmod
+from ..infill import patterns
 from .. import settingsio
 from .controls import ParameterPanel, SourceSpec
 from .preview2d import PreviewScene, PreviewView
@@ -445,6 +446,7 @@ class MainWindow(QMainWindow):
             s.perimeters, s.minimize_crossings, s.rotate_start,
             tuple((x.z_start, x.z_end, x.infill_type, x.percent)
                   for x in s.infill_sections),
+            patterns.generation(),
         )
 
     def generate(self):

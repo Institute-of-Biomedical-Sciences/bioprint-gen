@@ -36,6 +36,26 @@ class InfillType(str, Enum):
     GYROID = "gyroid"
 
 
+def pattern_id(v) -> str:
+    """Infill pattern id as a plain string.  Built-ins are `InfillType` members
+    (str enums, so they compare equal to their id); user patterns from the
+    patterns folder are plain strings such as "schwarz_p"."""
+    return str(getattr(v, "value", v))
+
+
+def parse_pattern(v):
+    """An `InfillType` for a built-in id, otherwise the id string itself."""
+    try:
+        return InfillType(pattern_id(v))
+    except ValueError:
+        return pattern_id(v)
+
+
+def _pattern_kind(v) -> Optional[str]:
+    from .infill import patterns          # lazy: the registry imports this module
+    return patterns.kind_of(v)
+
+
 class MoveKind(str, Enum):
     TRAVEL = "travel"      # non-extruding reposition
     PERIMETER = "perimeter"
@@ -183,13 +203,29 @@ class PrintSettings:
             return self.line_width / (self.infill_percent / 100.0)
         return self.strand_spacing
 
+    def is_levelset(self) -> bool:
+        """Gyroid or an equation pattern: sized by a period, not a spacing."""
+        if self.infill_type == InfillType.GYROID:
+            return True
+        if isinstance(self.infill_type, InfillType):
+            return False
+        return _pattern_kind(self.infill_type) == "levelset"
+
+    def line_density(self) -> float:
+        """Line density constant k of a level-set pattern (period = k*w/fraction)."""
+        if self.infill_type == InfillType.GYROID or isinstance(self.infill_type, InfillType):
+            return GYROID_LINE_DENSITY
+        from .infill import patterns
+        return patterns.line_density(self.infill_type)
+
     def effective_gyroid_period(self) -> float:
-        """Gyroid cell period actually used.  In percent mode it is chosen so the
-        laid-down line covers the same area fraction as rectilinear at that %
-        (measured: a gyroid section has GYROID_LINE_DENSITY / period mm of line
-        per mm^2)."""
+        """Level-set (gyroid / equation pattern) period actually used.  In
+        percent mode it is chosen so the laid-down line covers the same area
+        fraction as rectilinear at that % (measured: a gyroid section has
+        GYROID_LINE_DENSITY / period mm of line per mm^2; equation patterns are
+        measured when they load)."""
         if self.percent_mode() and self.infill_percent > 0:
-            return GYROID_LINE_DENSITY * self.line_width / (self.infill_percent / 100.0)
+            return self.line_density() * self.line_width / (self.infill_percent / 100.0)
         return self.gyroid_period
 
     def main_density_fraction(self) -> float:
@@ -197,8 +233,8 @@ class PrintSettings:
         w = self.line_width
         if self.percent_mode():
             return self.infill_percent / 100.0
-        if self.infill_type == InfillType.GYROID:
-            return GYROID_LINE_DENSITY * w / self.gyroid_period if self.gyroid_period > 0 else 0.0
+        if self.is_levelset():
+            return self.line_density() * w / self.gyroid_period if self.gyroid_period > 0 else 0.0
         return w / self.strand_spacing if self.strand_spacing > 0 else 0.0
 
     def infill_section_for(self, z_bottom: float) -> Optional["InfillSection"]:
@@ -256,8 +292,8 @@ class PrintSettings:
         else:
             if self.strand_spacing <= 0:
                 p.append("Strand spacing must be greater than 0.")
-            if self.infill_type == InfillType.GYROID and self.gyroid_period <= 0:
-                p.append("Gyroid period must be greater than 0.")
+            if self.is_levelset() and self.gyroid_period <= 0:
+                p.append("Period must be greater than 0.")
         if self.print_speed <= 0:
             p.append("Print speed must be greater than 0.")
         if self.travel_speed <= 0:
@@ -279,7 +315,13 @@ class PrintSettings:
         for i, sec in enumerate(self.layer_sections, 1):
             if sec.height <= 0:
                 p.append(f"Layer-height section {i}: height must be greater than 0.")
+        if _pattern_kind(self.infill_type) is None:
+            p.append(f"Infill pattern '{pattern_id(self.infill_type)}' is not available "
+                     "(not in the patterns folder, or it failed to load).")
         for i, sec in enumerate(self.infill_sections, 1):
+            if _pattern_kind(sec.infill_type) is None:
+                p.append(f"Infill section {i}: pattern '{pattern_id(sec.infill_type)}' "
+                         "is not available.")
             if not (0 <= sec.percent <= 100):
                 p.append(f"Infill section {i}: % must be between 0 and 100 "
                          "(0 = same density as the main infill).")

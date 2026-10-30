@@ -23,13 +23,14 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from .model import (
-    PrintSettings, Dialect, DriveMode, InfillType,
-    LayerHeightSection, ToolLineRange, InfillSection,
+    PrintSettings, Dialect, DriveMode,
+    LayerHeightSection, ToolLineRange, InfillSection, pattern_id, parse_pattern,
 )
 
 FILENAME = "default_settings.json"
 
-_ENUMS = {"dialect": Dialect, "infill_type": InfillType, "drive": DriveMode}
+# infill_type is not an enum any more: user patterns have plain string ids
+_ENUMS = {"dialect": Dialect, "infill_type": parse_pattern, "drive": DriveMode}
 _TUPLES = ("extruder2_offset", "extruder3_offset")
 # carried separately (top-level "source" in both the defaults file and the
 # exported settings block), never inside print_settings
@@ -60,8 +61,10 @@ def settings_to_dict(s: PrintSettings) -> dict:
         elif f.name == "tool_line_ranges":
             out[f.name] = [[x.start_line, x.end_line, x.extruder] for x in v]
         elif f.name == "infill_sections":
-            out[f.name] = [[x.z_start, x.z_end, x.infill_type.value, x.percent]
+            out[f.name] = [[x.z_start, x.z_end, pattern_id(x.infill_type), x.percent]
                            for x in v]
+        elif f.name == "infill_type":
+            out[f.name] = pattern_id(v)
         elif hasattr(v, "value"):            # Enum
             out[f.name] = v.value
         elif isinstance(v, tuple):
@@ -89,7 +92,7 @@ def dict_to_settings(d: dict) -> PrintSettings:
                                     for r in (v or [])]
             elif f.name == "infill_sections":
                 s.infill_sections = [InfillSection(float(r[0]), float(r[1]),
-                                                   InfillType(r[2]), float(r[3]))
+                                                   parse_pattern(r[2]), float(r[3]))
                                      for r in (v or [])]
             elif f.name == "tool_line_ranges":
                 s.tool_line_ranges = [ToolLineRange(int(r[0]), int(r[1]), int(r[2]))
@@ -189,7 +192,22 @@ def gcode_settings_payload(s: PrintSettings) -> str:
     """One-line JSON written into an export's settings block."""
     doc = {"version": 1, "print_settings": settings_to_dict(s),
            "source": dict(s.source or {})}
+    embedded = used_pattern_definitions(s)
+    if embedded:
+        doc["patterns"] = embedded
     return json.dumps(doc, separators=(",", ":"), ensure_ascii=False)
+
+
+def used_pattern_definitions(s: PrintSettings) -> dict:
+    """{id: definition} of the user equation patterns a print uses, so an
+    import can rebuild it on a machine that lacks the pattern file."""
+    from .infill import patterns
+    out = {}
+    for v in [s.infill_type] + [sec.infill_type for sec in s.infill_sections]:
+        p = patterns.get(v)
+        if p is not None and not p.builtin and p.kind == "levelset":
+            out[p.id] = p.definition()
+    return out
 
 
 def parse_gcode_settings(text: str):
@@ -211,6 +229,9 @@ def parse_gcode_settings(text: str):
         except Exception:
             continue
         ps = doc.get("print_settings", {}) or {}
+        if doc.get("patterns"):
+            from .infill import patterns
+            patterns.register_embedded(doc["patterns"])
         return (dict_to_settings(ps), doc.get("source", {}) or {},
                 ps.get("custom_flavour"), True)
 

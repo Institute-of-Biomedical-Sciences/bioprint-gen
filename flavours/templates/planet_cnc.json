@@ -1,0 +1,50 @@
+{
+  "name": "Planet CNC (template)",
+  "description": "Reproduces the built-in Planet CNC / Vitaprint writer byte-for-byte. Copy it, rename it and edit from here.",
+  "comment_prefix": ";",
+  "header": "%",
+  "setup": [
+    "{?zero_xy:G92\tX0\tY0}",
+    "G1\tZ0\tF{f_print}",
+    "{?tool_change:",
+    "#101 = 0 ; offset extruder 1 XY (reference)",
+    "#102 = {e2x} ; offset extruder 2 X",
+    "#103 = {e2y} ; offset extruder 2 Y",
+    "#104 = {e3x} ; offset extruder 3 X",
+    "#105 = {e3y} ; offset extruder 3 Y}",
+    "",
+    "{?piston&ramp:G1\t{axis}[#<{axisvar}> +{ramp}] ;ramp",
+    "}"
+  ],
+  "footer": [
+    "{?piston&ramp:G1\t{axis}[#<{axisvar}> -{ramp}] ;retract}",
+    "G1\tZ[#<_z> +{safe_hop}]\tF{f_z} ;go to safe height"
+  ],
+  "trailer": "%",
+  "layer_change": "; layer {layer}  z={z}",
+  "layer_end": [
+    "",
+    "G1\tZ[#<_z> +{rise}]\tF{f}",
+    ""
+  ],
+  "travel": "G0\tX{x}\tY{y}\tF{f}",
+  "extrude": "G1\tX{x}\tY{y}{?piston:\t{axis}[#<{axisvar}> +{da}{?flow_control: * #<_hw_jogpot>/511}]}{?stroke_start:\tF{f}}",
+  "coast": "G1\tX{x}\tY{y}",
+  "extruder_on": "{?pneumatic:M63 P{port} Q10000 E{valve}}",
+  "extruder_off": "{?pneumatic:M63 P{port} Q10000 E0}",
+  "stroke_start": "{?piston&start_ramp:G1\t{axis}[#<{axisvar}> +{start_ramp}] ;flow start}",
+  "stroke_end": "{?piston&end_retract:G1\t{axis}[#<{axisvar}> -{end_retract}] ;flow end}",
+  "dwell": "G4\tP{sec} ;dwell",
+  "end_dwell": "G4\tP{sec} ;end dwell",
+  "hop_up": "G1\tZ[#<_z> +{hop}]\tF{f} ;safe up",
+  "hop_down": "G1\tZ[#<_z> -{hop}]\tF{f} ;safe down",
+  "tool_leave": "{?!reference:G92\tX[#<_x> + #{offx_var}]\tY[#<_y> + #{offy_var}] ; remove extruder {tool} offset}",
+  "tool_enter": [
+    "{?!reference:; --- tool change: extruder {tool} ---",
+    "#5 = #<_x>",
+    "#6 = #<_y>",
+    "G0\tX[#<_x> + #{offx_var}]\tY[#<_y> + #{offy_var}]",
+    "G92\tX#5\tY#6}"
+  ],
+  "tool_change": ""
+}

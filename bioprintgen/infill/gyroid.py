@@ -35,11 +35,19 @@ def _field(xs: np.ndarray, ys: np.ndarray, z: float, f: float) -> np.ndarray:
 
 
 def generate(region, layer: Layer, settings: PrintSettings) -> List[Stroke]:
+    period = max(settings.effective_gyroid_period(), 1e-3)
+    return levelset_strokes(region, layer.z, period, _field)
+
+
+def levelset_strokes(region, z: float, period: float, field_fn,
+                     level: float = 0.0) -> List[Stroke]:
+    """Strokes along the `level` isocontour of `field_fn(xs, ys, z, f)` (with
+    f = 2*pi / period) over the region's bounding box, clipped to the region.
+    Shared by the gyroid and the user's equation patterns."""
     polys = as_polygons(region)
     if not polys:
         return []
     minx, miny, maxx, maxy = region.bounds
-    period = max(settings.effective_gyroid_period(), 1e-3)
     f = 2.0 * math.pi / period
 
     # sample density: enough points per cell to resolve the wave smoothly
@@ -51,9 +59,9 @@ def generate(region, layer: Layer, settings: PrintSettings) -> List[Stroke]:
     xs = np.linspace(minx, maxx, nx)
     ys = np.linspace(miny, maxy, ny)
 
-    field = _field(xs, ys, layer.z, f)
+    field = field_fn(xs, ys, z, f)
     gen = contour_generator(xs, ys, field)
-    raw_lines = gen.lines(0.0)  # list of (N,2) arrays, ordered
+    raw_lines = gen.lines(level)  # list of (N,2) arrays, ordered
 
     strokes: List[Stroke] = []
     for arr in raw_lines:

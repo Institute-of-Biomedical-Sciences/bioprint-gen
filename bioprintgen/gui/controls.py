@@ -6,30 +6,30 @@ to generate, plus a `changed` signal so the preview can auto-refresh.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import Signal, Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout, QGroupBox, QComboBox, QDoubleSpinBox,
     QSpinBox, QCheckBox, QPushButton, QLabel, QScrollArea, QFileDialog,
     QHBoxLayout, QTableWidget, QHeaderView, QPlainTextEdit, QToolButton,
-    QSizePolicy,
+    QSizePolicy, QMenu, QMessageBox,
 )
 
 from ..model import (
-    PrintSettings, InfillType, Dialect, DriveMode,
-    LayerHeightSection, ToolLineRange, InfillSection, GYROID_LINE_DENSITY,
+    PrintSettings, Dialect, DriveMode,
+    LayerHeightSection, ToolLineRange, InfillSection, pattern_id, parse_pattern,
 )
 from ..gcode import flavour as flavourmod
+from ..infill import patterns as patternreg
 from .flavourdialog import FlavourDialog
 from . import theme
 
 
-# pattern dropdown order, shared by the main pattern and the infill sections
-INFILL_LABELS = ("Rectilinear – connected", "Rectilinear – separate bars", "Gyroid")
-INFILL_TYPES = (InfillType.RECTILINEAR_CONNECTED, InfillType.RECTILINEAR_SEPARATE,
-                InfillType.GYROID)
+# Pattern dropdowns (main pattern and the infill sections) list the registry:
+# built-ins first (so Gyroid stays at index 2), then the user's patterns.
 
 
 @dataclass
@@ -130,6 +130,7 @@ class _Col:
     dec: int          # 0 -> integer spin box
     default: float
     choices: Optional[List[str]] = None   # -> dropdown; value is the index
+    tooltips: List[str] = field(default_factory=list)
 
 
 class SectionTable(QWidget):
@@ -170,6 +171,8 @@ class SectionTable(QWidget):
             if col.choices:
                 sp = Combo()
                 sp.addItems(col.choices)
+                for k, tip in enumerate(col.tooltips):
+                    sp.setItemData(k, tip, Qt.ToolTipRole)
                 sp.setCurrentIndex(int(v))
                 sp.currentIndexChanged.connect(lambda *_: self.changed.emit())
             elif col.dec == 0:
@@ -211,6 +214,24 @@ class SectionTable(QWidget):
 
     def apply_scale(self):
         self.table.setMaximumHeight(theme.px(150))
+
+    def set_choices(self, col: int, choices: List[str], tooltips=None):
+        """Replace a dropdown column's entries (new rows and existing ones).
+        Existing rows keep their index; the caller re-applies values if the
+        meaning of an index changed."""
+        self._cols[col].choices = list(choices)
+        self._cols[col].tooltips = list(tooltips or [])
+        for r in range(self.table.rowCount()):
+            w = self.table.cellWidget(r, col)
+            if isinstance(w, QComboBox):
+                i = w.currentIndex()
+                w.blockSignals(True)
+                w.clear()
+                w.addItems(self._cols[col].choices)
+                for k, tip in enumerate(self._cols[col].tooltips):
+                    w.setItemData(k, tip, Qt.ToolTipRole)
+                w.setCurrentIndex(min(max(i, 0), w.count() - 1))
+                w.blockSignals(False)
 
     def set_current_cell(self, col: int, value: float):
         """Set column `col` of the selected (or last) row; adds a row if empty."""
@@ -262,6 +283,7 @@ class ParameterPanel(QScrollArea):
         self.set_expanded_panels(["Design"])
 
         self._wire()
+        self._refresh_patterns()
         self._refresh_flavours()
         self._update_visibility()
 
@@ -355,8 +377,23 @@ class ParameterPanel(QScrollArea):
         f.addRow(self.layer_sections)
 
         self.infill = Combo()
-        self.infill.addItems(list(INFILL_LABELS))
-        f.addRow("Infill pattern", self.infill)
+        self.patterns_btn = QPushButton("Patterns…")
+        self.patterns_btn.setToolTip("Add your own infill patterns (equations or "
+                                     "Python plugins) in the patterns folder")
+        pmenu = QMenu(self.patterns_btn)
+        pmenu.addAction("Reload patterns", self.reload_patterns)
+        pmenu.addAction("Open patterns folder",
+                        lambda: self._open_folder(patternreg.patterns_dir()))
+        pmenu.addAction("Open templates folder",
+                        lambda: self._open_folder(patternreg.patterns_dir() / "templates"))
+        self.patterns_btn.setMenu(pmenu)
+        prow = QHBoxLayout()
+        prow.setContentsMargins(0, 0, 0, 0)
+        prow.addWidget(self.infill, 1)
+        prow.addWidget(self.patterns_btn)
+        self._pattern_row = QWidget()
+        self._pattern_row.setLayout(prow)
+        f.addRow("Infill pattern", self._pattern_row)
         self.infill_mode = Combo()
         self.infill_mode.addItems(["Strand spacing", "Infill %"])
         self.infill_mode.setToolTip("Set infill density directly (strand spacing / "
@@ -385,7 +422,7 @@ class ParameterPanel(QScrollArea):
         self.infill_sections = SectionTable([
             _Col("Z start", 0, 1000, 0.1, 3, 0.0),
             _Col("Z end", 0, 1000, 0.1, 3, 1.0),
-            _Col("Pattern", 0, 2, 1, 0, 2, choices=list(INFILL_LABELS)),
+            _Col("Pattern", 0, 2, 1, 0, 2, choices=["Gyroid"]),
             _Col("Infill %", 0, 100, 5, 1, 0.0),
         ])
         f.addRow(self.infill_sections)
@@ -527,6 +564,78 @@ class ParameterPanel(QScrollArea):
         f.addRow("End g-code", self.end_gcode)
         return g
 
+    # ------------------------------------------------------------------ patterns
+    def _refresh_patterns(self):
+        """(Re)fill both pattern dropdowns from the registry."""
+        pats = patternreg.available()
+        self._pattern_ids = [p.id for p in pats]
+        labels = [p.name for p in pats]
+        tips = [p.description for p in pats]
+        self.infill.blockSignals(True)
+        self.infill.clear()
+        self.infill.addItems(labels)
+        for k, tip in enumerate(tips):
+            self.infill.setItemData(k, tip, Qt.ToolTipRole)
+        self.infill.blockSignals(False)
+        self.infill_sections.set_choices(2, labels, tips)
+
+    def _pattern_index(self, pid) -> int:
+        """Dropdown index of a pattern id.  An id the registry does not know
+        (its file was removed or failed to load) gets a "(missing)" entry rather
+        than being silently swapped for another pattern; generating then
+        reports it."""
+        pid = pattern_id(pid)
+        if pid not in self._pattern_ids and patternreg.get(pid) is not None:
+            self._refresh_patterns()     # e.g. registered from an imported file
+        if pid not in self._pattern_ids:
+            self._pattern_ids.append(pid)
+            self.infill.addItem(f"{pid} (missing)")
+            self.infill_sections.set_choices(
+                2, [self.infill.itemText(i) for i in range(self.infill.count())])
+        return self._pattern_ids.index(pid)
+
+    def _pattern_at(self, index: int):
+        if 0 <= index < len(self._pattern_ids):
+            return parse_pattern(self._pattern_ids[index])
+        return parse_pattern("rectilinear_connected")
+
+    def _current_pattern_id(self) -> str:
+        return pattern_id(self._pattern_at(self.infill.currentIndex()))
+
+    def reload_patterns(self, quiet: bool = False):
+        """Re-read the patterns folder, keeping the current selections by id."""
+        main = self._current_pattern_id()
+        sections = [(a, b, pattern_id(self._pattern_at(int(k))), pct)
+                    for (a, b, k, pct) in self.infill_sections.rows()]
+        errors = patternreg.reload()
+        self._loading = True
+        try:
+            self._refresh_patterns()
+            self.infill.setCurrentIndex(self._pattern_index(main))
+            self.infill_sections.clear_rows()
+            for a, b, pid, pct in sections:
+                self.infill_sections._add_row((a, b, self._pattern_index(pid), pct))
+        finally:
+            self._loading = False
+        self._update_visibility()
+        self.changed.emit()
+        if not quiet:
+            user = [p.name for p in patternreg.available() if not p.builtin]
+            msg = f"Loaded {len(user)} pattern(s) from {patternreg.patterns_dir()}"
+            if user:
+                msg += ":\n  " + "\n  ".join(user)
+            if errors:
+                msg += "\n\nNot loaded:\n" + "\n".join(
+                    f"  {k}: {v}" for k, v in errors.items())
+                QMessageBox.warning(self, "Patterns", msg)
+            else:
+                QMessageBox.information(self, "Patterns", msg)
+        return errors
+
+    def _open_folder(self, folder):
+        folder.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
     # ------------------------------------------------------------------ flavours
     def _refresh_flavours(self, select_name: Optional[str] = None):
         """Rebuild the flavour combo from built-ins + saved custom flavours."""
@@ -622,25 +731,33 @@ class ParameterPanel(QScrollArea):
         self._show(self.stl_label, is_stl)
 
         # -- Layers / infill --
-        is_gyroid = self.infill.currentIndex() == 2
+        pid = self._current_pattern_id()
+        pat = patternreg.get(pid)
+        is_levelset = pat is not None and pat.kind == "levelset"
         percent = self.infill_mode.currentIndex() == 1
-        self._show(self.spacing, not percent and not is_gyroid)
-        self._show(self.gyroid_period, not percent and is_gyroid)
+        self._show(self.spacing, not percent and not is_levelset)
+        self._show(self.gyroid_period, not percent and is_levelset)
+        period_name = f"{pat.name} period" if is_levelset else "Period"
+        lbl = self.gyroid_period.parentWidget().layout().labelForField(self.gyroid_period)
+        if lbl is not None:
+            lbl.setText(period_name)
         self._show(self.infill_pct, percent)
         self._show(self.infill_info, percent)
-        self._show(self.infill_angle, not is_gyroid)
-        self._show(self.layer_rot, not is_gyroid)
+        self._show(self.infill_angle, not is_levelset)
+        self._show(self.layer_rot, not is_levelset)
         if percent and self.infill_pct.value() > 0:
             d = self.infill_pct.value() / 100.0
             w = self.line_width.value()
-            if is_gyroid:
-                self.infill_info.setText(
-                    f"≈ {GYROID_LINE_DENSITY * w / d:.2f} mm gyroid period")
+            if is_levelset:
+                k = patternreg.line_density(pid)
+                self.infill_info.setText(f"≈ {k * w / d:.2f} mm {period_name.lower()}")
             else:
                 self.infill_info.setText(f"≈ {w / d:.2f} mm strand spacing")
 
         # -- Printer / Extrusion: flavour + drive specific --
-        planet = self.dialect.currentIndex() == 0
+        # Marlin has no use for the drive settings; Planet CNC and custom
+        # flavours do (templates read them via {?piston}, {ramp}, {valve}, ...)
+        planet = self.dialect.currentIndex() != 1
         piston = self.drive.currentIndex() == 0
         metered = planet and piston
         self._show(self.drive, planet)
@@ -703,8 +820,7 @@ class ParameterPanel(QScrollArea):
             self.rotate_start.setChecked(bool(s.rotate_start))
             self.infill_angle.setValue(s.infill_angle)
             self.layer_rot.setValue(s.layer_rotation)
-            if s.infill_type in INFILL_TYPES:
-                self.infill.setCurrentIndex(INFILL_TYPES.index(s.infill_type))
+            self.infill.setCurrentIndex(self._pattern_index(s.infill_type))
             self.gyroid_period.setValue(s.gyroid_period)
             self.perimeters.setValue(s.perimeters)
             self.print_speed.setValue(s.print_speed)
@@ -748,7 +864,7 @@ class ParameterPanel(QScrollArea):
             self.infill_sections.clear_rows()
             for sec in s.infill_sections:
                 self.infill_sections._add_row(
-                    (sec.z_start, sec.z_end, INFILL_TYPES.index(sec.infill_type), sec.percent))
+                    (sec.z_start, sec.z_end, self._pattern_index(sec.infill_type), sec.percent))
             self.tool_ranges.clear_rows()
             for r in s.tool_line_ranges:
                 self.tool_ranges._add_row((r.start_line, r.end_line, r.extruder))
@@ -771,7 +887,7 @@ class ParameterPanel(QScrollArea):
         s.rotate_start = self.rotate_start.isChecked()
         s.infill_angle = self.infill_angle.value()
         s.layer_rotation = self.layer_rot.value()
-        s.infill_type = INFILL_TYPES[self.infill.currentIndex()]
+        s.infill_type = self._pattern_at(self.infill.currentIndex())
         s.gyroid_period = self.gyroid_period.value()
         s.perimeters = self.perimeters.value()
         s.print_speed = self.print_speed.value()
@@ -802,7 +918,7 @@ class ParameterPanel(QScrollArea):
         # variable-height sections
         s.layer_sections = [LayerHeightSection(a, b, h)
                             for (a, b, h) in self.layer_sections.rows()]
-        s.infill_sections = [InfillSection(a, b, INFILL_TYPES[int(k)], pct)
+        s.infill_sections = [InfillSection(a, b, self._pattern_at(int(k)), pct)
                              for (a, b, k, pct) in self.infill_sections.rows()]
         # tool change / extruders
         s.tool_change_enabled = self.tool_change.isChecked()

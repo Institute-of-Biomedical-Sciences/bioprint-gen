@@ -1,0 +1,26 @@
+{
+  "_help": [
+    "Equation (level-set) infill pattern - copy this file to the patterns folder",
+    "(one level up), rename it (the file name becomes the pattern id, e.g.",
+    "my_pattern.json -> 'my_pattern') and choose Patterns... -> Reload patterns.",
+    "",
+    "The strand follows the curve f(x, y, z) = level at each layer height, like",
+    "the gyroid. x, y, z are scaled so that 2*pi equals one Period (the cell size",
+    "set in the Layers panel), so f must repeat every 2*pi along x, y and z.",
+    "Infill % works automatically: the line density of the curve is measured",
+    "when the pattern loads.",
+    "",
+    "Allowed: numbers, x y z pi e tau, + - * / ** (or ^) %, and the functions",
+    "sin cos tan asin acos atan atan2 sinh cosh tanh exp log sqrt abs sign",
+    "floor min max. Anything else is rejected (the equation is parsed, never",
+    "run as code).",
+    "",
+    "Tips: keep |level| small - a level outside f's range gives no curves; a",
+    "non-zero level thickens one side of a TPMS (graded porosity). Keys starting",
+    "with '_' are ignored."
+  ],
+  "name": "My pattern",
+  "description": "One line shown as the tooltip in the pattern list.",
+  "equation": "sin(x)*cos(y) + sin(y)*cos(z) + sin(z)*cos(x)",
+  "level": 0
+}
