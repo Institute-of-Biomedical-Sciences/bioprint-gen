@@ -4,7 +4,7 @@ A g-code generator for **extrusion bioprinting** with a PySide6 GUI.
 
 Generate toolpaths for simple primitives (cuboids, cylinders) or import and slice your own **STL** meshes, choose an infill pattern, preview the result layer-by-layer, **edit individual toolpath vertices by drag-and-drop**, and export g-code in either a **[Planet CNC](https://planet-cnc.com/)**-compatible dialect (matching the Vitaprint reference machine) or a generic **[Marlin](https://marlinfw.org/)** flavor with absolute E. 
 
-This tool is developed to ease and optimize the flow control of gels and other soft materials with varying viscosity ranges and shear thinning properties. The main features for this purpose include controlled dwell (to compensate for flow delays), coasting (to compensate for oozing at stroke-end), as well as ramp and retraction of the material for piston-driven extruders.
+This tool is developed to ease and optimize the flow control of gels and other soft materials with varying viscosity ranges and shear thinning properties. The main features for this purpose include controlled dwell (to compensate for flow delays), coasting (to compensate for oozing at stroke-end), as well as ramp and retraction of the material for piston-driven extruders as previously described in our research paper: [Algorithmic linearization improves Syringe-based extrusion in elastic systems using Hydrogel-based materials](https://doi.org/10.1016/j.matdes.2023.111884)
 
 Contact: bostjan.vihar@um.si
 
@@ -253,5 +253,7 @@ human-readable problems, empty when everything is in order.
 
 ## Licensing
 
-This work is licensed under a [Creative Commons Attribution-ShareAlike 4.0 International
-License][cc-by-sa]: [![CC BY-SA 4.0][cc-by-sa-shield]][cc-by-sa].
+This work is licensed under a [Creative Commons Attribution 4.0 International
+License](https://creativecommons.org/licenses/by/4.0/): [![CC BY 4.0][cc-by-shield]][cc-by].
+
+[cc-by-shield]: https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg
