@@ -254,6 +254,6 @@ human-readable problems, empty when everything is in order.
 ## Licensing
 
 This work is licensed under a [Creative Commons Attribution 4.0 International
-License](https://creativecommons.org/licenses/by/4.0/): [![CC BY 4.0][cc-by-shield]][cc-by].
+License](https://creativecommons.org/licenses/by/4.0/): ![CC BY 4.0][cc-by-shield].
 
 [cc-by-shield]: https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg
