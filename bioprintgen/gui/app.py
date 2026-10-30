@@ -6,6 +6,7 @@ re-renders only the g-code text (no reslice/replan), so editing stays instant.
 """
 from __future__ import annotations
 
+import difflib
 import os
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,7 @@ from ..model import PrintSettings, Dialect, DriveMode
 from ..pipeline import Project
 from ..geometry import stlslicer
 from ..gcode import writer as gwriter
+from ..gcode import flavour as flavourmod
 from .. import settingsio
 from .controls import ParameterPanel, SourceSpec
 from .preview2d import PreviewScene, PreviewView
@@ -193,9 +195,10 @@ class MainWindow(QMainWindow):
         gen.setObjectName("primary")
         gen.clicked.connect(self.generate)
         tb.addWidget(gen)
-        act_stl = QAction("Import STL", self)
-        act_stl.triggered.connect(self.import_stl)
-        tb.addAction(act_stl)
+        act_imp = QAction("Import g-code", self)
+        act_imp.setToolTip("Open a previously exported file and restore its settings")
+        act_imp.triggered.connect(self.import_gcode)
+        tb.addAction(act_imp)
         act_exp = QAction("Export g-code", self)
         act_exp.triggered.connect(self.export_gcode)
         tb.addAction(act_exp)
@@ -306,6 +309,126 @@ class MainWindow(QMainWindow):
         self.panel.shape.setCurrentIndex(2)
         self.generate()
 
+    # ------------------------------------------------------------------ import
+    def import_gcode(self):
+        """Open an exported file, restore its settings + source into the panel,
+        rebuild the toolpath from them, and report whether the rebuild matches."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import g-code", "",
+            "G-code (*.gcode *.nc *.txt);;All files (*)")
+        if not path:
+            return
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            QMessageBox.critical(self, "Import failed", f"Could not read {path}:\n{e}")
+            return
+        parsed = settingsio.parse_gcode_settings(text)
+        if parsed is None:
+            QMessageBox.warning(
+                self, "Nothing to restore",
+                "This file contains no BioprintGEN settings block, so its "
+                "settings can't be restored.\n\nOnly files exported with "
+                "'Write settings as comment block' enabled can be imported.")
+            return
+        settings, source, flavour_name, complete = parsed
+        notes: List[str] = []
+
+        # custom flavours are stored by name; resolve against the local library
+        if settings.dialect == Dialect.CUSTOM:
+            tmpl = flavourmod.list_flavours().get(flavour_name or "")
+            if tmpl is None:
+                settings.dialect = Dialect.PLANET_CNC
+                notes.append(f"Custom flavour “{flavour_name}” isn't in your flavour "
+                             "library — switched to Planet CNC.")
+            settings.custom_flavour = tmpl
+
+        spec = None
+        if complete and source:
+            spec = SourceSpec(
+                kind=source.get("kind", "cuboid"),
+                width=float(source.get("width", 10.0)),
+                depth=float(source.get("depth", 10.0)),
+                height=float(source.get("height", 5.0)),
+                diameter=float(source.get("diameter", 12.0)),
+                stl_path=source.get("stl_path") or None,
+            )
+            if spec.kind == "stl":
+                stl = self._locate_stl(spec.stl_path, Path(path).parent)
+                if stl is None:
+                    spec = None
+                    notes.append("The STL used for this file wasn't found — choose "
+                                 "it in Design → Choose STL file to rebuild the part.")
+                else:
+                    try:
+                        self._stl_model = stlslicer.load_stl(str(stl))
+                        spec.stl_path = str(stl)
+                    except Exception as e:  # noqa
+                        spec = None
+                        notes.append(f"Could not load the STL ({e}).")
+        elif not complete:
+            notes.append("This file was exported by an older version that didn't "
+                         "record its shape. Print settings were restored; the part "
+                         "was rebuilt with the shape currently set in Design.")
+
+        self.panel.apply_settings(settings)
+        if spec is not None:
+            self.panel.apply_source(spec)
+        self._geom_sig = None                      # always rebuild from the file
+        self.generate()
+        if not self.project:
+            return
+
+        name = os.path.basename(path)
+        if spec is not None and self.project.toolpath:
+            diff = self._count_motion_differences(text, self.project.gcode_text())
+            if diff == 0:
+                self.statusBar().showMessage(
+                    f"Imported {name} — settings restored, rebuilt toolpath matches the file")
+            else:
+                notes.insert(0, f"The rebuilt g-code differs from the file in {diff} "
+                                "motion line(s). The file probably contains manual "
+                                "vertex edits, which aren't stored in its settings, or "
+                                "was made by a different version. The preview and code "
+                                "panel show the rebuilt version; the file on disk is "
+                                "unchanged.")
+        if notes:
+            QMessageBox.information(self, f"Imported {name}", "\n\n".join(notes))
+            self.statusBar().showMessage(f"Imported {name} — see notes")
+
+    def _locate_stl(self, stl_path: Optional[str], gcode_dir: Path) -> Optional[Path]:
+        """Find the STL a file was made from: its stored path, then next to the
+        g-code file, then ask the user."""
+        if stl_path:
+            p = Path(stl_path)
+            if p.is_file():
+                return p
+            beside = gcode_dir / p.name
+            if beside.is_file():
+                return beside
+        hint = Path(stl_path).name if stl_path else "the STL"
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, f"Locate {hint}", str(gcode_dir),
+            "Mesh files (*.stl *.obj *.ply *.off);;All files (*)")
+        return Path(chosen) if chosen else None
+
+    @staticmethod
+    def _count_motion_differences(a: str, b: str) -> int:
+        """Lines that differ once comments, blanks and line endings are ignored."""
+        def motion(text):
+            out = []
+            for line in text.replace("\r\n", "\n").split("\n"):
+                s = line.strip()
+                if s and not s.startswith(";"):
+                    out.append(s)
+            return out
+        # a real diff, so one inserted line counts once instead of shifting
+        # every line after it
+        ops = difflib.SequenceMatcher(None, motion(a), motion(b),
+                                      autojunk=False).get_opcodes()
+        return sum(max(i2 - i1, j2 - j1) for tag, i1, i2, j1, j2 in ops
+                   if tag != "equal")
+
     def _current_settings(self) -> PrintSettings:
         return self.panel.build_settings()
 
@@ -317,8 +440,11 @@ class MainWindow(QMainWindow):
             spec.kind, spec.width, spec.depth, spec.height, spec.diameter, spec.stl_path,
             s.layer_height, s.first_layer_height,
             tuple((x.z_start, x.z_end, x.height) for x in s.layer_sections),
-            s.line_width, s.strand_spacing, s.infill_angle, s.layer_rotation,
-            s.infill_type, s.gyroid_period, s.perimeters, s.minimize_crossings,
+            s.line_width, s.infill_angle, s.layer_rotation, s.infill_type,
+            s.effective_spacing(), s.effective_gyroid_period(),
+            s.perimeters, s.minimize_crossings, s.rotate_start,
+            tuple((x.z_start, x.z_end, x.infill_type, x.percent)
+                  for x in s.infill_sections),
         )
 
     def generate(self):

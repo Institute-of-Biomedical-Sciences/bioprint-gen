@@ -39,7 +39,7 @@ def generate(region, layer: Layer, settings: PrintSettings) -> List[Stroke]:
     if not polys:
         return []
     minx, miny, maxx, maxy = region.bounds
-    period = max(settings.gyroid_period, 1e-3)
+    period = max(settings.effective_gyroid_period(), 1e-3)
     f = 2.0 * math.pi / period
 
     # sample density: enough points per cell to resolve the wave smoothly

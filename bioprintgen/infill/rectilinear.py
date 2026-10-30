@@ -81,9 +81,10 @@ def _connected(strands: List[Stroke], region, spacing: float) -> List[Stroke]:
 
 def generate(region, layer: Layer, settings: PrintSettings, connected: bool) -> List[Stroke]:
     angle = layer_angle(settings.infill_angle, settings.layer_rotation, layer.index)
-    strands = _ordered_strands(region, angle, settings.strand_spacing)
+    spacing = settings.effective_spacing()
+    strands = _ordered_strands(region, angle, spacing)
     if not strands:
         return []
     if connected:
-        return _connected(strands, region, settings.strand_spacing)
+        return _connected(strands, region, spacing)
     return strands

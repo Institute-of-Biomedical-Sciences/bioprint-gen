@@ -29,6 +29,9 @@ _FIELDS = [
     ("tool_change", "Tool change", "{tool} {offx} {offy}"),
     ("extruder_on", "Extruder on (optional)", "{tool}"),
     ("extruder_off", "Extruder off (optional)", "{tool}"),
+    ("dwell", "Dwell (start/end pause)", "{sec}"),
+    ("hop_up", "Travel safe height — up", "{zup} {z} {hop} {f}"),
+    ("hop_down", "Travel safe height — down", "{z} {zup} {hop} {f}"),
     ("footer", "Footer", "{name} {z_max} {safe_z}"),
 ]
 

@@ -112,10 +112,13 @@ def test_load_defaults_reads_ui_scale(tmp_path):
     assert ui["scale"] == 1.75
 
 
-def test_shipped_defaults_file_has_scale():
+def test_shipped_defaults_file_has_a_valid_scale():
+    """The user may have zoomed (the app writes ui.scale back), so only check
+    that the value is present and in range — never that it's the default."""
     loaded = settingsio.load_defaults()
     assert loaded is not None
-    assert loaded[2].get("scale") == 1.0
+    scale = loaded[2].get("scale")
+    assert scale is not None and 0.7 <= float(scale) <= 2.5
 
 
 def test_malformed_defaults_file_is_tolerated(tmp_path):

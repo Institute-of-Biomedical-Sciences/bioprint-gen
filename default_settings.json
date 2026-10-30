@@ -4,7 +4,7 @@
     "theme": "dark",
     "scale": 0.9,
     "expanded_panels": [
-      "Source"
+      "Design"
     ]
   },
   "source": {
@@ -63,6 +63,10 @@
     "end_gcode": "",
     "write_settings_header": true,
     "gcode_line_ending": "crlf",
-    "minimize_crossings": true
+    "minimize_crossings": true,
+    "infill_mode": "spacing",
+    "infill_percent": 40.0,
+    "rotate_start": true,
+    "infill_sections": []
   }
 }

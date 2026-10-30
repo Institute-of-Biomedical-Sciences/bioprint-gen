@@ -29,6 +29,7 @@ from ..model import (
     LayerToolpath, Move, MoveKind, PrintSettings, Dialect, DriveMode,
 )
 from .flavour import FlavourTemplate, fill
+from ..settingsio import GCODE_JSON_MARKER, gcode_settings_payload
 
 
 @dataclass
@@ -157,7 +158,7 @@ def flow_emits(lt: LayerToolpath, s: PrintSettings) -> List[_Emit]:
 #  Settings comment block
 # --------------------------------------------------------------------------- #
 _HEADER_SKIP = {"custom_flavour", "layer_sections", "tool_line_ranges",
-                "start_gcode", "end_gcode"}
+                "infill_sections", "start_gcode", "end_gcode", "source"}
 
 
 def settings_header_lines(s: PrintSettings, cp: str = ";") -> List[str]:
@@ -174,12 +175,23 @@ def settings_header_lines(s: PrintSettings, cp: str = ";") -> List[str]:
         lines.append(f"{cp} layer_sections:")
         for sec in s.layer_sections:
             lines.append(f"{cp}   z[{sec.z_start} .. {sec.z_end}] height={sec.height}")
+    if s.infill_sections:
+        lines.append(f"{cp} infill_sections:")
+        for sec in s.infill_sections:
+            lines.append(f"{cp}   infill z[{sec.z_start} .. {sec.z_end}] "
+                         f"pattern={sec.infill_type.value} percent={sec.percent}")
     if s.tool_line_ranges:
         lines.append(f"{cp} tool_line_ranges (clean-baseline lines):")
         for r in s.tool_line_ranges:
             lines.append(f"{cp}   lines {r.start_line}..{r.end_line} -> extruder {r.extruder}")
     if s.custom_flavour is not None:
         lines.append(f"{cp} custom_flavour = {getattr(s.custom_flavour, 'name', '?')}")
+    if s.source:
+        src = ", ".join(f"{k}={v}" for k, v in s.source.items())
+        lines.append(f"{cp} source: {src}")
+    # machine-readable copy of everything above (+ source, start/end g-code),
+    # used by "Import g-code" to restore the session exactly
+    lines.append(f"{cp} {GCODE_JSON_MARKER} {gcode_settings_payload(s)}")
     lines.append(f"{cp} ===============================")
     return lines
 

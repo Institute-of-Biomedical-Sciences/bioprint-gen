@@ -74,11 +74,37 @@ def _emit_stroke(moves: List[Move], stroke: Stroke, kind: MoveKind,
     return prev
 
 
+def _rotate_loop(stroke: Stroke, anchor: Point) -> Stroke:
+    """Re-start a closed loop at the vertex nearest `anchor` (moves the seam).
+    Open strokes are returned unchanged."""
+    if len(stroke) < 4 or tuple(stroke[0]) != tuple(stroke[-1]):
+        return stroke
+    pts = list(stroke[:-1])
+    k = min(range(len(pts)), key=lambda i: _dist2(pts[i], anchor))
+    rot = pts[k:] + pts[:k]
+    return rot + [rot[0]]
+
+
+def layer_start_corner(region, index: int) -> Point:
+    """Corner of the layer's bounding box that layer `index` starts nearest:
+    bottom-left, bottom-right, top-right, top-left, repeating."""
+    minx, miny, maxx, maxy = region.bounds
+    return [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)][index % 4]
+
+
 def plan_layer(layer: Layer, settings: PrintSettings,
-               start_pos: Optional[Point] = None) -> LayerToolpath:
+               start_pos: Optional[Point] = None,
+               seed: Optional[Point] = None) -> LayerToolpath:
+    """Plan one layer.
+
+    `start_pos` is where the nozzle actually is (the travel starts there);
+    `seed`, if given, is the point the layer should *begin* nearest to — used to
+    rotate the start/seam between layers without inventing a fake travel.
+    """
     lt = LayerToolpath(z=layer.z, index=layer.index, height=layer.height,
                        extruder=getattr(layer, "extruder", 1))
     cur: Point = start_pos if start_pos is not None else (0.0, 0.0)
+    anchor: Point = seed if seed is not None else cur
 
     # 1. perimeters + shrink region for infill
     inner, walls = perimeter_strokes(layer.regions, settings.perimeters,
@@ -94,12 +120,16 @@ def plan_layer(layer: Layer, settings: PrintSettings,
     else:
         infill_strokes = gyroid.generate(inner, layer, settings)
 
-    # 3. order and emit. Walls first (kept in given order), then ordered infill.
-    walls = _order_strokes(walls, cur, settings.minimize_crossings)
+    # 3. order and emit. Walls first, then ordered infill.  With a seed, each
+    #    closed wall's seam is moved to the vertex nearest it.
+    if seed is not None:
+        walls = [_rotate_loop(w, anchor) for w in walls]
+    walls = _order_strokes(walls, anchor, settings.minimize_crossings)
     for w in walls:
         cur = _emit_stroke(lt.moves, w, MoveKind.PERIMETER, cur)
 
-    infill_strokes = _order_strokes(infill_strokes, cur, settings.minimize_crossings)
+    infill_from = cur if walls else anchor
+    infill_strokes = _order_strokes(infill_strokes, infill_from, settings.minimize_crossings)
     for s in infill_strokes:
         cur = _emit_stroke(lt.moves, s, MoveKind.INFILL, cur)
 
@@ -109,8 +139,13 @@ def plan_layer(layer: Layer, settings: PrintSettings,
 def plan_all(layers: List[Layer], settings: PrintSettings) -> List[LayerToolpath]:
     out: List[LayerToolpath] = []
     cur: Optional[Point] = None
-    for layer in layers:
-        lt = plan_layer(layer, settings, start_pos=cur)
+    for i, layer in enumerate(layers):
+        seed = None
+        if settings.rotate_start and layer.regions is not None                 and not layer.regions.is_empty:
+            seed = layer_start_corner(layer.regions, i)
+        # per-layer pattern/density from the infill sections (if any cover it)
+        layer_settings = settings.for_layer(layer.z - layer.height)
+        lt = plan_layer(layer, layer_settings, start_pos=cur, seed=seed)
         out.append(lt)
         if lt.moves:
             cur = lt.moves[-1].end

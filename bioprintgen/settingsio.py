@@ -8,27 +8,35 @@ a partial file is fine.
 Layout:
 
     {
-      "ui":             {"theme": "dark", "expanded_panels": ["Source"]},
+      "ui":             {"theme": "dark", "expanded_panels": ["Design"]},
       "source":         {"kind": "cuboid", "width": 10, ...},
       "print_settings": {"layer_height": 0.2, ...}
     }
 """
 from __future__ import annotations
 
+import ast
 import json
+import re
 from dataclasses import fields
 from pathlib import Path
 from typing import Optional, Tuple
 
 from .model import (
     PrintSettings, Dialect, DriveMode, InfillType,
-    LayerHeightSection, ToolLineRange,
+    LayerHeightSection, ToolLineRange, InfillSection,
 )
 
 FILENAME = "default_settings.json"
 
 _ENUMS = {"dialect": Dialect, "infill_type": InfillType, "drive": DriveMode}
 _TUPLES = ("extruder2_offset", "extruder3_offset")
+# carried separately (top-level "source" in both the defaults file and the
+# exported settings block), never inside print_settings
+_NOT_SERIALISED = {"source"}
+# marker of the machine-readable line in an exported file's settings block
+GCODE_JSON_MARKER = "BIOPRINTGEN_JSON"
+
 
 
 def default_settings_path() -> Path:
@@ -42,6 +50,8 @@ def default_settings_path() -> Path:
 def settings_to_dict(s: PrintSettings) -> dict:
     out = {}
     for f in fields(s):
+        if f.name in _NOT_SERIALISED:
+            continue
         v = getattr(s, f.name)
         if f.name == "custom_flavour":
             out[f.name] = getattr(v, "name", None)
@@ -49,6 +59,9 @@ def settings_to_dict(s: PrintSettings) -> dict:
             out[f.name] = [[x.z_start, x.z_end, x.height] for x in v]
         elif f.name == "tool_line_ranges":
             out[f.name] = [[x.start_line, x.end_line, x.extruder] for x in v]
+        elif f.name == "infill_sections":
+            out[f.name] = [[x.z_start, x.z_end, x.infill_type.value, x.percent]
+                           for x in v]
         elif hasattr(v, "value"):            # Enum
             out[f.name] = v.value
         elif isinstance(v, tuple):
@@ -67,13 +80,17 @@ def dict_to_settings(d: dict) -> PrintSettings:
             continue
         v = d[f.name]
         try:
-            if f.name == "custom_flavour":
-                continue                     # resolved by name in the GUI
+            if f.name == "custom_flavour" or f.name in _NOT_SERIALISED:
+                continue                     # flavour resolved by name in the GUI
             if f.name in _ENUMS:
                 setattr(s, f.name, _ENUMS[f.name](v))
             elif f.name == "layer_sections":
                 s.layer_sections = [LayerHeightSection(float(r[0]), float(r[1]), float(r[2]))
                                     for r in (v or [])]
+            elif f.name == "infill_sections":
+                s.infill_sections = [InfillSection(float(r[0]), float(r[1]),
+                                                   InfillType(r[2]), float(r[3]))
+                                     for r in (v or [])]
             elif f.name == "tool_line_ranges":
                 s.tool_line_ranges = [ToolLineRange(int(r[0]), int(r[1]), int(r[2]))
                                       for r in (v or [])]
@@ -114,7 +131,7 @@ _COMMENT = ("Edit these values to change what BioprintGEN starts with. The app "
 def _template_doc() -> dict:
     return {
         "_comment": _COMMENT,
-        "ui": {"theme": "dark", "scale": 1.0, "expanded_panels": ["Source"]},
+        "ui": {"theme": "dark", "scale": 1.0, "expanded_panels": ["Design"]},
         "source": {"kind": "cuboid", "width": 10.0, "depth": 10.0,
                    "height": 5.0, "diameter": 12.0, "stl_path": None},
         "print_settings": settings_to_dict(PrintSettings()),
@@ -156,3 +173,86 @@ def save_ui_scale(scale: float, path: Optional[Path] = None) -> bool:
         return True
     except OSError:
         return False
+
+
+# --------------------------------------------------------------------------- #
+#  Reading settings back out of an exported g-code file
+# --------------------------------------------------------------------------- #
+_RE_SECTION = re.compile(r"z\[([-\d.]+)\s*\.\.\s*([-\d.]+)\]\s*height=([-\d.]+)")
+_RE_INFILL = re.compile(r"infill z\[([-\d.]+)\s*\.\.\s*([-\d.]+)\]\s*"
+                        r"pattern=(\w+)\s+percent=([-\d.]+)")
+_RE_RANGE = re.compile(r"lines\s+(\d+)\.\.(\d+)\s*->\s*extruder\s+(\d+)")
+_RE_KEYVAL = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
+
+
+def gcode_settings_payload(s: PrintSettings) -> str:
+    """One-line JSON written into an export's settings block."""
+    doc = {"version": 1, "print_settings": settings_to_dict(s),
+           "source": dict(s.source or {})}
+    return json.dumps(doc, separators=(",", ":"), ensure_ascii=False)
+
+
+def parse_gcode_settings(text: str):
+    """Recover settings from an exported file.
+
+    Returns (settings, source_dict, flavour_name, complete), or None when the
+    file holds no BioprintGEN settings at all.  `complete` is True when the
+    machine-readable JSON line was found (exports from this version on); older
+    exports only carry the human-readable ``; key = value`` lines, which restore
+    the print settings but not the source shape.
+    """
+    lines = text.replace("\r\n", "\n").split("\n")
+    for line in lines:
+        i = line.find(GCODE_JSON_MARKER)
+        if i < 0:
+            continue
+        try:
+            doc = json.loads(line[i + len(GCODE_JSON_MARKER):].strip())
+        except Exception:
+            continue
+        ps = doc.get("print_settings", {}) or {}
+        return (dict_to_settings(ps), doc.get("source", {}) or {},
+                ps.get("custom_flavour"), True)
+
+    # --- fallback: the human-readable block of older exports ---
+    names = {f.name for f in fields(PrintSettings())}
+    raw: dict = {}
+    sections, ranges, infills = [], [], []
+    in_block = False
+    for line in lines:
+        body = line.strip().lstrip(";#/").strip()
+        if "BioprintGEN settings" in body:
+            in_block = True
+            continue
+        if not in_block:
+            continue
+        m = _RE_INFILL.match(body)
+        if m:
+            infills.append([float(m.group(1)), float(m.group(2)),
+                            m.group(3), float(m.group(4))])
+            continue
+        m = _RE_SECTION.match(body)
+        if m:
+            sections.append([float(g) for g in m.groups()])
+            continue
+        m = _RE_RANGE.match(body)
+        if m:
+            ranges.append([int(g) for g in m.groups()])
+            continue
+        m = _RE_KEYVAL.match(body)
+        if m and m.group(1) in names:
+            val = m.group(2).strip()
+            try:
+                raw[m.group(1)] = ast.literal_eval(val)
+            except Exception:
+                raw[m.group(1)] = val          # enum value strings etc.
+    if not raw:
+        return None
+    if sections:
+        raw["layer_sections"] = sections
+    if ranges:
+        raw["tool_line_ranges"] = ranges
+    if infills:
+        raw["infill_sections"] = infills
+    return dict_to_settings(raw), {}, raw.get("custom_flavour"), False
+

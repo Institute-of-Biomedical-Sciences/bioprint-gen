@@ -15,6 +15,8 @@ Available placeholders per action
 * extrude     : {x} {y} {e} {de} {f} {length}
 * tool_change : {tool} {offx} {offy}
 * extruder_on / extruder_off : {tool}
+* dwell       : {sec}                      (start and end dwell)
+* hop_up / hop_down : {z} {zup} {hop} {f}  (travel safe height; zup = z + hop)
 
 Any placeholder a template does not use is simply ignored, and any unknown
 placeholder is left as literal text rather than raising.

@@ -9,7 +9,7 @@ identical from the infill stage onward.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
@@ -64,9 +64,25 @@ class ToolLineRange:
     extruder: int = 2
 
 
+@dataclass
+class InfillSection:
+    """A z-range [z_start, z_end] printed with its own infill pattern/density.
+
+    Density is a percentage so it means the same for every pattern; 0 keeps the
+    main infill's density (converted to the equivalent percentage)."""
+    z_start: float
+    z_end: float
+    infill_type: InfillType = InfillType.GYROID
+    percent: float = 0.0
+
+
 # --------------------------------------------------------------------------- #
 #  Settings
 # --------------------------------------------------------------------------- #
+# mm of gyroid section line per mm^2, per mm of period (measured on the generator
+# over a full period in z; constant across periods). Used for percent-mode infill.
+GYROID_LINE_DENSITY = 2.494
+
 @dataclass
 class PrintSettings:
     # --- shape / model ---
@@ -83,7 +99,16 @@ class PrintSettings:
 
     infill_type: InfillType = InfillType.RECTILINEAR_CONNECTED
     gyroid_period: float = 6.0          # mm, spatial period of the gyroid cell
+    # how infill density is specified: "spacing" (strand_spacing / gyroid_period
+    # as given) or "percent" (infill_percent of the area, derived from line_width)
+    infill_mode: str = "spacing"
+    infill_percent: float = 40.0
+    # z-ranges with their own pattern/density; anything uncovered uses the above
+    infill_sections: List[InfillSection] = field(default_factory=list)
     perimeters: int = 1                 # number of contour walls before infill
+    # cycle each layer's start point (perimeter seam + infill start) around the
+    # four bounding-box corners, so start/stop artefacts don't stack up
+    rotate_start: bool = True
 
     # --- speeds ---
     print_speed: float = 500.0          # mm/min  (matches reference feedrate)
@@ -144,6 +169,56 @@ class PrintSettings:
 
     # --- planning ---
     minimize_crossings: bool = True
+    # where the geometry came from (shape + dimensions / STL path); written into
+    # the exported settings block so "Import g-code" can rebuild the part
+    source: Dict = field(default_factory=dict)
+
+    # -- infill density --
+    def percent_mode(self) -> bool:
+        return str(self.infill_mode).lower() == "percent"
+
+    def effective_spacing(self) -> float:
+        """Strand centre spacing actually used by rectilinear infill."""
+        if self.percent_mode() and self.infill_percent > 0:
+            return self.line_width / (self.infill_percent / 100.0)
+        return self.strand_spacing
+
+    def effective_gyroid_period(self) -> float:
+        """Gyroid cell period actually used.  In percent mode it is chosen so the
+        laid-down line covers the same area fraction as rectilinear at that %
+        (measured: a gyroid section has GYROID_LINE_DENSITY / period mm of line
+        per mm^2)."""
+        if self.percent_mode() and self.infill_percent > 0:
+            return GYROID_LINE_DENSITY * self.line_width / (self.infill_percent / 100.0)
+        return self.gyroid_period
+
+    def main_density_fraction(self) -> float:
+        """Area fraction covered by the *main* infill, whichever way it is set."""
+        w = self.line_width
+        if self.percent_mode():
+            return self.infill_percent / 100.0
+        if self.infill_type == InfillType.GYROID:
+            return GYROID_LINE_DENSITY * w / self.gyroid_period if self.gyroid_period > 0 else 0.0
+        return w / self.strand_spacing if self.strand_spacing > 0 else 0.0
+
+    def infill_section_for(self, z_bottom: float) -> Optional["InfillSection"]:
+        """Section covering a layer whose bottom sits at `z_bottom` (first match
+        wins), using the same convention as the layer-height sections."""
+        for sec in self.infill_sections:
+            lo, hi = min(sec.z_start, sec.z_end), max(sec.z_start, sec.z_end)
+            if lo - 1e-9 <= z_bottom < hi - 1e-9:
+                return sec
+        return None
+
+    def for_layer(self, z_bottom: float) -> "PrintSettings":
+        """Settings to plan one layer with: the main settings, or a copy with the
+        pattern and density of the infill section covering that layer."""
+        sec = self.infill_section_for(z_bottom)
+        if sec is None:
+            return self
+        frac = sec.percent / 100.0 if sec.percent > 0 else self.main_density_fraction()
+        return replace(self, infill_type=sec.infill_type,
+                       infill_mode="percent", infill_percent=frac * 100.0)
 
     def eff_first_layer_height(self) -> float:
         return self.first_layer_height if self.first_layer_height else self.layer_height
@@ -174,19 +249,23 @@ class PrintSettings:
         if self.first_layer_height is not None and self.first_layer_height < 0:
             p.append("First layer height cannot be negative.")
         if self.line_width <= 0:
-            p.append("Line width must be greater than 0.")
-        if self.strand_spacing <= 0:
-            p.append("Strand spacing must be greater than 0.")
+            p.append("Nozzle diameter must be greater than 0.")
+        if self.percent_mode():
+            if not (0 < self.infill_percent <= 100):
+                p.append("Infill % must be between 0 and 100.")
+        else:
+            if self.strand_spacing <= 0:
+                p.append("Strand spacing must be greater than 0.")
+            if self.infill_type == InfillType.GYROID and self.gyroid_period <= 0:
+                p.append("Gyroid period must be greater than 0.")
         if self.print_speed <= 0:
             p.append("Print speed must be greater than 0.")
         if self.travel_speed <= 0:
             p.append("Travel speed must be greater than 0.")
         if self.z_speed <= 0:
-            p.append("Z speed must be greater than 0.")
+            p.append("Layer change speed must be greater than 0.")
         if int(self.perimeters) < 0:
             p.append("Perimeters cannot be negative.")
-        if self.infill_type == InfillType.GYROID and self.gyroid_period <= 0:
-            p.append("Gyroid period must be greater than 0.")
         if self.coast_distance < 0:
             p.append("Coast distance cannot be negative.")
         if self.start_dwell < 0:
@@ -194,12 +273,16 @@ class PrintSettings:
         if self.end_dwell < 0:
             p.append("End dwell cannot be negative.")
         if self.travel_lift < 0:
-            p.append("Travel lift cannot be negative.")
+            p.append("Travel safe height cannot be negative.")
         if self.filament_area <= 0:
             p.append("Filament area must be greater than 0.")
         for i, sec in enumerate(self.layer_sections, 1):
             if sec.height <= 0:
                 p.append(f"Layer-height section {i}: height must be greater than 0.")
+        for i, sec in enumerate(self.infill_sections, 1):
+            if not (0 <= sec.percent <= 100):
+                p.append(f"Infill section {i}: % must be between 0 and 100 "
+                         "(0 = same density as the main infill).")
         return p
 
     def offset_for_extruder(self, extruder: int) -> Tuple[float, float]:
@@ -213,7 +296,8 @@ class PrintSettings:
 # --------------------------------------------------------------------------- #
 #  Layer-stack z construction (shared by primitives + STL slicer)
 # --------------------------------------------------------------------------- #
-MAX_LAYERS = 100_000     # sanity cap so a degenerate height can't exhaust memory
+MAX_LAYERS = 100_000
+     # sanity cap so a degenerate height can't exhaust memory
 
 
 def build_z_levels(total_height: float, settings: PrintSettings
