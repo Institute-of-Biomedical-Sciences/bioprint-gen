@@ -6,6 +6,8 @@ Generate toolpaths for simple primitives (cuboids, cylinders) or import and slic
 
 This tool is developed to ease and optimize the flow control of gels and other soft materials with varying viscosity ranges and shear thinning properties. The main features for this purpose include controlled dwell (to compensate for flow delays), coasting (to compensate for oozing at stroke-end), as well as ramp and retraction of the material for piston-driven extruders as previously described in our research paper: [Algorithmic linearization improves Syringe-based extrusion in elastic systems using Hydrogel-based materials](https://doi.org/10.1016/j.matdes.2023.111884)
 
+Disclaimer: This repository was built with the help of Claude Code.
+
 Contact: bostjan.vihar@um.si
 
 ---
