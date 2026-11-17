@@ -51,7 +51,7 @@ def assert_row(widget, shown: bool, what: str):
 # --------------------------------------------------------------------------- #
 def test_panel_order(panel):
     assert list(panel.sections) == ["Printer", "Design", "Layers", "Extrusion",
-                                    "Printing process", "Advanced options"]
+                                    "Printing process", "Well plate", "Advanced options"]
 
 
 def test_only_design_is_expanded_by_default(panel):
@@ -383,3 +383,200 @@ def test_pattern_embedded_in_an_import_shows_by_name(panel, tmp_path, monkeypatc
     finally:
         monkeypatch.delenv("BIOPRINTGEN_PATTERNS")
         patterns.reload()
+
+
+# --------------------------------------------------------------------------- #
+#  Components
+# --------------------------------------------------------------------------- #
+def test_component_editor_round_trip(panel):
+    from bioprintgen.model import Component, PrintSettings
+    ed = panel.components
+    ed.add_btn.click()
+    assert not ed.form_box.isHidden()
+    ed.shape.setCurrentIndex(1)                      # cylinder
+    assert ed._form.isRowVisible(ed.diameter) and not ed._form.isRowVisible(ed.size_y)
+    ed.diameter.setValue(3.5)
+    ed.cx.setValue(5.0)
+    ed.extruder.setCurrentIndex(1)
+    ed.walls.setValue(2)
+    ed.pattern.setCurrentIndex(ed._pattern_ids.index("gyroid"))
+    c = panel.build_settings().components[0]
+    assert (c.shape, c.size_x, c.x, c.extruder, c.walls, c.pattern) == \
+        ("cylinder", 3.5, 5.0, 2, 2, "gyroid")
+    s = PrintSettings()
+    s.components = [Component(name="core", walls=-1), c]
+    panel.apply_settings(s)
+    assert panel.build_settings().components == s.components
+    assert ed.walls.text() == "merge with part"
+
+
+def test_component_reorder_changes_priority(panel):
+    from bioprintgen.model import Component, PrintSettings
+    s = PrintSettings()
+    s.components = [Component(name="a"), Component(name="b")]
+    panel.apply_settings(s)
+    ed = panel.components
+    ed.list.setCurrentRow(1)
+    ed.up_btn.click()
+    assert [c.name for c in panel.build_settings().components] == ["b", "a"]
+    ed.rem_btn.click()
+    assert [c.name for c in panel.build_settings().components] == ["a"]
+
+
+def test_added_components_go_on_top_and_never_stack(panel):
+    """A second '+ Add' used to land exactly under the first and vanish."""
+    from bioprintgen.model import PrintSettings
+    panel.apply_settings(PrintSettings())
+    ed = panel.components
+    ed.set_main_bounds((0.0, 0.0, 10.0, 10.0))
+    ed.add_btn.click()
+    ed.name.setText("first")
+    ed.add_btn.click()
+    comps = panel.build_settings().components
+    assert comps[1].name == "first" and ed.list.currentRow() == 0   # newest on top
+    assert (comps[1].x, comps[1].y) == (5.0, 5.0)                    # main centre
+    assert (comps[0].x, comps[0].y) != (comps[1].x, comps[1].y)
+    ed.dup_btn.click()
+    comps = panel.build_settings().components
+    assert len({(c.x, c.y) for c in comps}) == 3
+
+
+def test_walls_spinner_counts_walls(panel):
+    from bioprintgen.model import Component, PrintSettings
+    s = PrintSettings()
+    s.components = [Component(walls=-1)]           # file from the first version
+    panel.apply_settings(s)
+    ed = panel.components
+    assert ed.walls.value() == 0 and ed.walls.text() == "merge with part"
+    ed.walls.stepBy(1)
+    assert ed.walls.text() == "1" and panel.build_settings().components[0].walls == 1
+
+
+def test_subtract_hides_material_fields_and_axis_shows_length(panel):
+    from bioprintgen.model import Component, PrintSettings
+    s = PrintSettings()
+    s.components = [Component()]
+    panel.apply_settings(s)
+    ed = panel.components
+    vis = ed._form.isRowVisible
+    assert vis(ed.extruder) and vis(ed.walls) and not vis(ed.axis)
+    ed.operation.setCurrentIndex(1)
+    assert not vis(ed.extruder) and not vis(ed.pattern) and not vis(ed.walls)
+    ed.shape.setCurrentIndex(1)
+    assert vis(ed.axis) and vis(ed.height) and not vis(ed.length) and not vis(ed.rotation)
+    ed.axis.setCurrentIndex(1)
+    assert vis(ed.length) and not vis(ed.height) and vis(ed.rotation)
+    ed.length.setValue(12.0)
+    c = panel.build_settings().components[0]
+    assert (c.operation, c.shape, c.axis, c.size_y) == ("subtract", "cylinder", "horizontal", 12.0)
+    assert ed.list.item(0).text().startswith("− ")
+
+
+def test_stl_component_in_the_editor(panel, tmp_path):
+    import trimesh
+    from bioprintgen.model import Component, PrintSettings
+    path = tmp_path / "part.stl"
+    trimesh.creation.box(extents=(2.0, 3.0, 4.0)).export(path)
+    s = PrintSettings()
+    s.components = [Component()]
+    panel.apply_settings(s)
+    ed = panel.components
+    ed.set_stl_path(str(path))
+    vis = ed._form.isRowVisible
+    assert vis(ed.stl_row) and vis(ed.scale) and vis(ed.rot_x) and vis(ed.rotation)
+    assert not vis(ed.size_x) and not vis(ed.height) and not vis(ed.diameter)
+    assert "2.00 × 3.00 × 4.00 mm" in ed.stl_size.text()
+    ed.scale.setValue(50)
+    assert "1.00 × 1.50 × 2.00 mm" in ed.stl_size.text()
+    c = panel.build_settings().components[0]
+    assert (c.shape, c.stl_path, c.scale) == ("stl", str(path), 50.0)
+    assert ed.stl_name.text() == "part.stl"
+
+
+# --------------------------------------------------------------------------- #
+#  Well plate
+# --------------------------------------------------------------------------- #
+def _set_point(spins, *values):
+    for s, v in zip(spins, values):
+        s.setValue(v)
+
+
+def test_plate_dialog_round_trip_and_live_calibration(app):
+    import math
+    from bioprintgen import placement as plc
+    from bioprintgen.gui.platedialog import PlateDialog
+    dlg = PlateDialog(plc.Placement(enabled=True, wells=["A1", "B2"]), part_radius=4.0)
+    assert len(dlg._cells) == 24 and dlg._cells["B2"].isChecked()
+    assert (dlg.rim_well.currentText(), dlg.centre_well.currentText()) == ("A1", "D6")
+    dlg.preset.setCurrentIndex(0)                       # 6-well
+    assert len(dlg._cells) == 6 and dlg.pitch_x.value() == 39.12
+    assert dlg.centre_well.currentText() == "B3"         # D6 is gone: opposite corner
+    dlg._toggle_line(row=0)                             # all of row A
+    rim = [(50 + 17.4 * math.cos(math.radians(a)), 60 + 17.4 * math.sin(math.radians(a)))
+           for a in (0, 120, 240)]
+    _set_point(dlg.p1, *rim[0], 21.0)
+    _set_point(dlg.p2, *rim[1])
+    _set_point(dlg.p3, *rim[2])
+    _set_point(dlg.p4, 50 + 2 * 39.12, 60 - 39.12, 3.5)  # B3 centre, unrotated
+    text = dlg.result.text()
+    assert "A1 centre: X 50.000, Y 60.000" in text and "Plate angle +0.00°" in text
+    assert "measured Ø" not in text and "check" not in text   # no diameter check
+    dlg.between.setCurrentIndex(2)
+    assert dlg._run_form.isRowVisible(dlg.dwell)
+    out = dlg.placement()
+    assert out.plate.name == "6-well" and sorted(out.wells) == ["A1", "A2", "A3", "B2"]
+    assert out.rim_z == 21.0 and out.floor_z == 3.5 and out.centre_well == "B3"
+    assert out.between == "dwell"
+
+
+def test_calibration_wells_can_be_picked(app):
+    from bioprintgen import placement as plc
+    from bioprintgen.gui.platedialog import PlateDialog
+    dlg = PlateDialog(plc.Placement(enabled=True, wells=["A1"]))
+    dlg.rim_well.setCurrentText("B2")
+    dlg.centre_well.setCurrentText("C5")
+    assert "rim of B2" in dlg.hint.text() and "centre of C5" in dlg.hint.text()
+    out = dlg.placement()
+    assert (out.rim_well, out.centre_well) == ("B2", "C5")
+    dlg.centre_well.setCurrentText("B2")
+    assert "must be different" in dlg.result.text()
+
+
+def test_plate_dialog_flags_a_part_that_does_not_fit(app):
+    from bioprintgen import placement as plc
+    from bioprintgen.gui.platedialog import PlateDialog
+    pl = plc.Placement(enabled=True, wells=["A1"], guided=True)
+    dlg = PlateDialog(pl, part_radius=9.0)
+    assert "will not fit" in dlg.result.text()
+
+
+def test_plate_dialog_guided_mode_hides_the_coordinates(app):
+    from bioprintgen import placement as plc
+    from bioprintgen.gui.platedialog import PlateDialog
+    dlg = PlateDialog(plc.Placement(enabled=True, wells=["A1", "A2"]), part_radius=3.0)
+    assert all(dlg._cal_form.isRowVisible(r) for r in dlg._typed_rows)
+    dlg.mode.setCurrentIndex(1)
+    assert not any(dlg._cal_form.isRowVisible(r) for r in dlg._typed_rows)
+    assert dlg._cal_form.isRowVisible(dlg.rim_well) and dlg._cal_form.isRowVisible(dlg.centre_well)
+    assert "asks for each point" in dlg.hint.text()
+    assert "summary" in dlg.result.text()
+    assert dlg.placement().guided
+
+
+def test_plate_panel_section(panel):
+    from bioprintgen.model import PrintSettings
+    assert panel.plate_btn.isEnabled() is False
+    s = PrintSettings()
+    s.placement.enabled = True
+    s.placement.wells = ["A1", "A2"]
+    s.placement.guided = True
+    panel.apply_settings(s)
+    assert panel.plate_on.isChecked() and panel.plate_btn.isEnabled()
+    assert "2 well(s)" in panel.plate_summary.text()
+    assert "rim of A1 + centre of D6" in panel.plate_summary.text()
+    assert_row(panel.zero_xy, False, "G92 zero on a plate")
+    back = panel.build_settings()
+    assert back.placement == s.placement
+    panel.plate_on.setChecked(False)
+    assert panel.build_settings().placement.enabled is False
+    assert_row(panel.zero_xy, True, "G92 zero without a plate")

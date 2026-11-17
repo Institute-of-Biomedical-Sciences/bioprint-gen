@@ -10,7 +10,7 @@
     "{?tool_change:G10 L1 P1 X0 Y0 ; extruder 1 (reference)",
     "G10 L1 P2 X{e2x} Y{e2y} ; extruder 2 offset",
     "G10 L1 P3 X{e3x} Y{e3y} ; extruder 3 offset}",
-    "{?zero_xy:G92 X0 Y0 Z0 E0}{?!zero_xy:G92 E0}",
+    "{?zero_xy&!plate:G92 X0 Y0 Z0 E0}{?!zero_xy:G92 E0}{?zero_xy&plate:G92 E0}",
     "{blank}"
   ],
   "footer": [
@@ -36,5 +36,15 @@
   "hop_down": "G1 Z{z} F{f} ; safe down",
   "tool_leave": "",
   "tool_enter": "T{tool0} ; {?final:back to }extruder {tool}",
-  "tool_change": ""
+  "tool_change": "",
+  "well_start": [
+    "; ===== well {well} ({well_index}/{well_count}) =====",
+    "G1 Z{z_travel} F{f}",
+    "G0 X{x} Y{y} F{f_travel}"
+  ],
+  "well_end": [
+    "G1 Z{z_travel} F{f}",
+    "{?well_pause&!last_well:M0 Well {well} done - press to continue}",
+    "{?well_dwell&!last_well:G4 S{sec} ; well dwell}"
+  ]
 }

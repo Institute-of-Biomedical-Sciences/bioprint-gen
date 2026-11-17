@@ -6,6 +6,8 @@ Generate toolpaths for simple primitives (cuboids, cylinders) or import and slic
 
 This tool is developed to ease and optimize the flow control of gels and other soft materials with varying viscosity ranges and shear thinning properties. The main features for this purpose include controlled dwell (to compensate for flow delays), coasting (to compensate for oozing at stroke-end), as well as ramp and retraction of the material for piston-driven extruders as previously described in our research paper: [Algorithmic linearization improves Syringe-based extrusion in elastic systems using Hydrogel-based materials](https://doi.org/10.1016/j.matdes.2023.111884)
 
+Disclaimer: This repository was built with the help of Claude Code.
+
 Contact: bostjan.vihar@um.si
 
 ---
@@ -20,6 +22,13 @@ settings that apply to the current selection (see `MANUAL.md` §1–2).
   - Cuboid (X × Y × Z)
   - Cylinder (walls discretised into a fine 128-segment polygon)
   - STL file + planar slicing (interior holes preserved)
+  - **Components** — extra cuboids / cylinders / **STL meshes** (scaled and rotated
+    about X, Y, Z) added to the part, each with its own
+    infill pattern and %, **extruder** (multi-material; tool changes are emitted
+    automatically) and walls (*merge* = seamless join, or the number of walls between
+    the component and the part). **Subtract** components cut voids and channels
+    (horizontal cylinders for round perfusion channels). Placed by centre, Z start
+    and Z rotation; higher in the list wins where shapes overlap. Booleans are done per layer in 2D, so they are fast and exact
 - **Infill patterns**
   - Rectilinear **connected** — a serpentine strand that is only joined with
     extruded material where the connector stays inside the part, so holes/bores and
@@ -72,10 +81,17 @@ settings that apply to the current selection (see `MANUAL.md` §1–2).
 - **Import g-code** — opens a previously exported file, fills every panel from its
   settings block (including the shape / STL, tool ranges and start/end g-code),
   rebuilds the toolpath and confirms the rebuild matches the file.
+- **Multi-well plates** — print the part into selected wells of a 6 / 12 / 24-well
+  plate (editable values), row by row, with lifts above the rim between wells and an
+  optional pause or wait. Calibration is 4 points: three on the rim of one well (the
+  first also gives the rim height) and the centre of a second well on its floor
+  (rotation, spacing check, floor height) — typed into the app, or **guided at print
+  time** on Planet CNC (the program asks you to jog to each point, computes the
+  placement itself, and calls the print once per well).
 - **Custom start / end g-code** — free-text blocks injected after the machine header
   and before the footer.
 - **Settings block** — every setting written as comments at the **end** of the file
-  (plus one machine-readable `BIOPRINTGEN_JSON` line), so a print can be reproduced or
+  (plus a machine-readable `BIOPRINTGEN_JSON` record, split into short lines), so a print can be reproduced or
   re-imported later.
 - **Custom g-code flavours** — define per-action templates (travel, extrude, layer
   change, tool change, dwell, travel hop, …) with placeholders and `{?condition:…}`
@@ -226,9 +242,11 @@ bioprintgen/
 │   ├── model.py                dataclasses / enums / PrintSettings
 │   ├── pipeline.py             Project façade (from_cuboid / from_cylinder / from_stl)
 │   ├── settingsio.py           default_settings.json + settings block of exports (import)
+│   ├── placement.py            multi-well plates: presets, calibration, per-well copies
 │   ├── geometry/
 │   │   ├── primitives.py       cuboid & cylinder layer regions
-│   │   └── stlslicer.py        STL load, drop-to-bed, planar slicing
+│   │   ├── stlslicer.py        STL load, drop-to-bed, planar slicing
+│   │   └── components.py       per-layer composition of the main shape + components
 │   ├── infill/
 │   │   ├── base.py             insets, clipping, parallel line sets, layer angle
 │   │   ├── rectilinear.py      connected (serpentine) & separate bars
@@ -243,6 +261,7 @@ bioprintgen/
 │       ├── app.py              MainWindow, docks, auto-regenerate
 │       ├── controls.py         parameter panel (six collapsible panels, hides inapplicable rows)
 │       ├── flavourdialog.py    flavour editor (new from template / save / import / export)
+│       ├── platedialog.py      well plate setup (plate, well map, calibration)
 │       ├── preview2d.py        editable QGraphicsScene (drag / add / remove vertices)
 │       ├── sideview.py         non-editable X–Z elevation of the layer stack
 │       ├── codeview.py         line-numbered g-code view

@@ -24,7 +24,7 @@ from typing import Optional, Tuple
 
 from .model import (
     PrintSettings, Dialect, DriveMode,
-    LayerHeightSection, ToolLineRange, InfillSection, pattern_id, parse_pattern,
+    LayerHeightSection, ToolLineRange, InfillSection, Component, pattern_id, parse_pattern,
 )
 
 FILENAME = "default_settings.json"
@@ -37,6 +37,22 @@ _TUPLES = ("extruder2_offset", "extruder3_offset")
 _NOT_SERIALISED = {"source"}
 # marker of the machine-readable line in an exported file's settings block
 GCODE_JSON_MARKER = "BIOPRINTGEN_JSON"
+# Planet CNC rejects a file with a line of ~1500+ characters ("program is
+# empty", found on the machine), so the JSON is split over short lines
+GCODE_JSON_CHUNK = 200
+
+
+def gcode_settings_chunks(payload: str, size: int = GCODE_JSON_CHUNK) -> list:
+    """`payload` cut into pieces of at most `size` characters, never at
+    whitespace (an editor stripping trailing spaces must not change it)."""
+    out, i, n = [], 0, len(payload)
+    while i < n:
+        j = min(i + size, n)
+        while i + 1 < j < n and (payload[j - 1].isspace() or payload[j].isspace()):
+            j -= 1
+        out.append(payload[i:j])
+        i = j
+    return out or [""]
 
 
 
@@ -65,6 +81,10 @@ def settings_to_dict(s: PrintSettings) -> dict:
                            for x in v]
         elif f.name == "infill_type":
             out[f.name] = pattern_id(v)
+        elif f.name == "components":
+            out[f.name] = [component_to_dict(c) for c in v]
+        elif f.name == "placement":
+            out[f.name] = placement_to_dict(v)
         elif hasattr(v, "value"):            # Enum
             out[f.name] = v.value
         elif isinstance(v, tuple):
@@ -72,6 +92,66 @@ def settings_to_dict(s: PrintSettings) -> dict:
         else:
             out[f.name] = v
     return out
+
+
+_COMPONENT_TYPES = {f.name: f.type for f in fields(Component)}
+
+
+def component_to_dict(c: Component) -> dict:
+    return {f.name: getattr(c, f.name) for f in fields(Component)}
+
+
+def dict_to_component(d: dict) -> Component:
+    """Missing or malformed keys keep the Component default."""
+    c = Component()
+    casts = {"float": float, "int": int, "str": str, "bool": bool}
+    for k, v in d.items():
+        cast = casts.get(str(_COMPONENT_TYPES.get(k)))
+        if cast is None:
+            continue
+        try:
+            setattr(c, k, cast(v) if cast is not int else int(float(v)))
+        except (TypeError, ValueError):
+            continue
+    return c
+
+
+def placement_to_dict(pl) -> dict:
+    from dataclasses import asdict
+    return asdict(pl)
+
+
+def dict_to_placement(d):
+    """Missing or malformed keys keep the defaults."""
+    from .placement import Placement, PlateSpec
+    pl = Placement()
+    if not isinstance(d, dict):
+        return pl
+    plate = PlateSpec()
+    for f in fields(PlateSpec):
+        if f.name in (d.get("plate") or {}):
+            try:
+                setattr(plate, f.name, type(getattr(plate, f.name))(d["plate"][f.name]))
+            except (TypeError, ValueError):
+                pass
+    pl.plate = plate
+    for f in fields(Placement):
+        if f.name == "plate" or f.name not in d:
+            continue
+        default = getattr(pl, f.name)
+        v = d[f.name]
+        try:
+            if isinstance(default, list):
+                v = [list(map(float, p)) if isinstance(p, (list, tuple)) else str(p)
+                     for p in (v or [])]
+            elif isinstance(default, bool):
+                v = bool(v)
+            else:
+                v = type(default)(v)
+            setattr(pl, f.name, v)
+        except (TypeError, ValueError):
+            continue
+    return pl
 
 
 def dict_to_settings(d: dict) -> PrintSettings:
@@ -94,6 +174,11 @@ def dict_to_settings(d: dict) -> PrintSettings:
                 s.infill_sections = [InfillSection(float(r[0]), float(r[1]),
                                                    parse_pattern(r[2]), float(r[3]))
                                      for r in (v or [])]
+            elif f.name == "components":
+                s.components = [dict_to_component(c) for c in (v or [])
+                                if isinstance(c, dict)]
+            elif f.name == "placement":
+                s.placement = dict_to_placement(v)
             elif f.name == "tool_line_ranges":
                 s.tool_line_ranges = [ToolLineRange(int(r[0]), int(r[1]), int(r[2]))
                                       for r in (v or [])]
@@ -203,7 +288,9 @@ def used_pattern_definitions(s: PrintSettings) -> dict:
     import can rebuild it on a machine that lacks the pattern file."""
     from .infill import patterns
     out = {}
-    for v in [s.infill_type] + [sec.infill_type for sec in s.infill_sections]:
+    used = [s.infill_type] + [sec.infill_type for sec in s.infill_sections] + \
+        [c.pattern for c in s.components if c.pattern]
+    for v in used:
         p = patterns.get(v)
         if p is not None and not p.builtin and p.kind == "levelset":
             out[p.id] = p.definition()
@@ -220,12 +307,20 @@ def parse_gcode_settings(text: str):
     the print settings but not the source shape.
     """
     lines = text.replace("\r\n", "\n").split("\n")
-    for line in lines:
+    for k, line in enumerate(lines):
         i = line.find(GCODE_JSON_MARKER)
-        if i < 0:
+        if i < 0 or line[i + len(GCODE_JSON_MARKER):].startswith("+"):
             continue
+        # the JSON may continue on "<marker>+ ..." lines (exports split it so
+        # no line is too long for Planet CNC); older exports have one line
+        payload = line[i + len(GCODE_JSON_MARKER):].lstrip()
+        for cont in lines[k + 1:]:
+            j = cont.find(GCODE_JSON_MARKER + "+ ")
+            if j < 0:
+                break
+            payload += cont[j + len(GCODE_JSON_MARKER) + 2:]
         try:
-            doc = json.loads(line[i + len(GCODE_JSON_MARKER):].strip())
+            doc = json.loads(payload.strip())
         except Exception:
             continue
         ps = doc.get("print_settings", {}) or {}

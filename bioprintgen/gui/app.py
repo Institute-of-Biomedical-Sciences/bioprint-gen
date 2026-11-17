@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from ..model import PrintSettings, Dialect, DriveMode
 from ..pipeline import Project
-from ..geometry import stlslicer
+from ..geometry import stlslicer, components as componentgeo
 from ..gcode import writer as gwriter
 from ..gcode import flavour as flavourmod
 from ..infill import patterns
@@ -66,6 +66,7 @@ class MainWindow(QMainWindow):
         self._debounce.timeout.connect(self.generate)
 
         self.panel.changed.connect(self._on_param_changed)
+        self.panel.part_radius_provider = self._part_radius
         self.panel.stl_requested.connect(self.import_stl)
         self.panel.line_from_selection.connect(self._on_line_from_selection)
         self.scene.edited.connect(self._on_layer_edited)
@@ -372,6 +373,19 @@ class MainWindow(QMainWindow):
                          "record its shape. Print settings were restored; the part "
                          "was rebuilt with the shape currently set in Design.")
 
+        # STL components: stored path, then next to the g-code file, then ask
+        for i, c in enumerate(settings.components, 1):
+            if c.shape != "stl" or (c.stl_path and Path(c.stl_path).is_file()):
+                continue
+            found = self._locate_stl(c.stl_path, Path(path).parent)
+            if found is None:
+                c.enabled = False
+                notes.append(f"Component {i}'s STL ({Path(c.stl_path).name or '?'}) "
+                             "wasn't found — the component was switched off; choose its "
+                             "file in Design → Components and switch it back on.")
+            else:
+                c.stl_path = str(found)
+
         self.panel.apply_settings(settings)
         if spec is not None:
             self.panel.apply_source(spec)
@@ -447,6 +461,7 @@ class MainWindow(QMainWindow):
             tuple((x.z_start, x.z_end, x.infill_type, x.percent)
                   for x in s.infill_sections),
             patterns.generation(),
+            tuple(tuple(vars(c).values()) for c in s.components),
         )
 
     def generate(self):
@@ -502,10 +517,24 @@ class MainWindow(QMainWindow):
             self.view.fit()
         self.side_view.fit()
         self._update_stats()
+        self.panel.components.set_main_bounds(
+            componentgeo.main_bounds(getattr(self.project, "main_layers", [])))
         msg = f"Generated {self.project.source_desc}"
-        if settings.tool_change_enabled and settings.tool_line_ranges and not self._show_tc:
-            msg += (f"  ·  {len(settings.tool_line_ranges)} tool section(s) applied — "
+        if self._has_tool_changes(settings) and not self._show_tc:
+            msg += (f"  ·  tool changes applied — "
                     "enable 'Show tool changes' or export to see the offset sequence")
+        if settings.placement.enabled:
+            from .. import placement as plc
+            n = len(settings.placement.wells)
+            msg += f"  ·  {n} well(s) on a {settings.placement.plate.name} plate"
+            warn = plc.fit_warning(settings.placement, self.project.toolpath)
+            if warn:
+                msg += f"  ·  ⚠ {warn}"
+        hidden = componentgeo.hidden_components(self.project.layers)
+        if hidden:
+            names = ", ".join(str(i + 1) for i in hidden)
+            msg += (f"  ·  component {names} has no effect: covered by a component "
+                    "higher in the list, or a subtract that misses the part")
         self.statusBar().showMessage(msg)
 
     def _regenerate_gcode(self, settings):
@@ -517,13 +546,25 @@ class MainWindow(QMainWindow):
                 m.extruder = 1
         self._clean_glines = self.project.glines()          # truly clean (all tool 1)
         self._move_to_line = gwriter.move_line_map(self._clean_glines)
-        if settings.tool_change_enabled and settings.tool_line_ranges:
+        if self._has_tool_changes(settings):
+            # component extruders first, then the line ranges on top
             gwriter.apply_line_ranges(tp, self._clean_glines, settings.tool_line_ranges)
             self._applied_glines = self.project.glines()
         else:
             self._applied_glines = self._clean_glines
         self.glines = self._applied_glines if self._show_tc else self._clean_glines
         self._render_gcode_text()
+
+    def _part_radius(self) -> float:
+        from .. import placement as plc
+        if not self.project or not self.project.toolpath:
+            return 0.0
+        return plc.part_frame(self.project.toolpath)[1]
+
+    @staticmethod
+    def _has_tool_changes(s) -> bool:
+        return bool(s.tool_change_enabled and
+                    (s.tool_line_ranges or s.component_extruders() - {1}))
 
     def _rerender_gcode(self):
         """Re-render after a geometry edit *without* touching per-move tools, so
@@ -545,7 +586,7 @@ class MainWindow(QMainWindow):
 
     def _update_gcode_title(self):
         s = self.project.settings if self.project else None
-        has_tc = bool(s and s.tool_change_enabled and s.tool_line_ranges)
+        has_tc = bool(s and self._has_tool_changes(s))
         if not has_tc:
             self.gdock.setWindowTitle("G-code")
         elif self._show_tc:

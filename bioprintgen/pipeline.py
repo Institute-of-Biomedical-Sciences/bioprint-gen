@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from .model import Layer, LayerToolpath, PrintSettings
-from .geometry import primitives, stlslicer
+from .geometry import primitives, stlslicer, components
 from .planning import toolpath as planner
 from .gcode import writer as gwriter
 from .gcode.writer import GLine
@@ -23,6 +23,12 @@ class Project:
     toolpath: List[LayerToolpath] = field(default_factory=list)
     source_desc: str = ""
     _model: Optional[stlslicer.SlicedModel] = None
+
+    def __post_init__(self):
+        # extra components are merged in here, so every way of building a
+        # project (primitives, STL, the GUI) gets them; a no-op without any
+        self.main_layers = self.layers
+        self.layers = components.compose_layers(self.layers, self.settings)
 
     # ---- constructors ----
     @classmethod
@@ -49,7 +55,8 @@ class Project:
     def reslice(self):
         """Re-run slicing for an STL source after settings change."""
         if self._model is not None:
-            self.layers = stlslicer.slice_model(self._model, self.settings)
+            self.main_layers = stlslicer.slice_model(self._model, self.settings)
+            self.layers = components.compose_layers(self.main_layers, self.settings)
 
     def plan(self):
         self.toolpath = planner.plan_all(self.layers, self.settings)

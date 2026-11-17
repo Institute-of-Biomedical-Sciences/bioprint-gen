@@ -69,6 +69,9 @@ class FlavourTemplate:
     tool_leave: str = ""
     tool_enter: str = ""
     tool_change: str = "T{tool} ; offset {offx},{offy}"
+    # -- multi-well plates (only used when printing into a plate) --
+    well_start: str = ""
+    well_end: str = ""
 
     # ---- (de)serialisation ----
     def to_dict(self) -> dict:
@@ -122,6 +125,12 @@ ACTIONS = [
         ("hop_up", "Up", "{z} {zup} {hop} {f}=Z speed"),
         ("hop_down", "Down", "{z} {zup} {hop} {f}=Z speed"),
     ]),
+    ("Multi-well plate", [
+        ("well_start", "Well start", "{well} {well_index} {well_count} {x} {y} {z} "
+                                     "{z_travel} {f}=Z speed {f_travel}"),
+        ("well_end", "Well end", "{well} {z_travel} {sec}=dwell between wells  "
+                                 "conditions: well_pause well_dwell last_well"),
+    ]),
     ("Tool change", [
         ("tool_leave", "Leave extruder", "{tool} {tool0} {offx} {offy} {offx_var} {offy_var}"),
         ("tool_enter", "Enter extruder", "{tool} {tool0} {offx} {offy} {offx_var} {offy_var}"),
@@ -144,6 +153,8 @@ ORDER (per move)
   Layer: layer start ... moves ... extruder off, layer end.
   File: header, start g-code, setup, layers, return to extruder 1,
         end g-code, footer, settings block, trailer.
+  Plate: well start before each well's first layer, well end after its last
+        (layer end still runs first).  z / {z} are absolute (calibrated).
 
 GLOBAL PLACEHOLDERS (every action)
   {name} {layer_count} {first_z} {z_max} {safe_z}=z_max+safe height
@@ -160,6 +171,7 @@ CONDITIONS
   first_layer  last_layer                         (layer and move actions)
   stroke_start  stroke_end                        (move actions)
   reference (tool is extruder 1)  final (return to extruder 1 at the end)
+  plate (printing into a well plate)  well_pause  well_dwell  last_well
 """
 
 

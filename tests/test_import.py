@@ -1,6 +1,8 @@
 """Import g-code: settings + source survive an export and rebuild identically."""
 from __future__ import annotations
 
+import pytest
+
 from bioprintgen import settingsio
 from bioprintgen.model import (
     PrintSettings, LayerHeightSection, ToolLineRange, DriveMode,
@@ -109,3 +111,70 @@ def test_pneumatic_ink_flow_is_bar_times_ten():
     p = Project.from_cuboid(8, 8, 0.4, s)
     p.plan()
     assert "M63 P1 Q10000 E15" in p.gcode_text()
+
+
+# --------------------------------------------------------------------------- #
+#  line length: Planet CNC reports "program is empty" for a ~1500-char line
+# --------------------------------------------------------------------------- #
+MAX_LINE = 255
+
+
+def _big_settings():
+    from bioprintgen import placement as plc
+    from bioprintgen.model import Component
+    import dataclasses
+    s = PrintSettings()
+    s.layer_height = 0.2
+    s.start_gcode = "M3 S100 ; a start line with   several   spaces"
+    s.components = [Component(name=f"part {i}", x=i, y=i) for i in range(4)]
+    pl = s.placement
+    pl.enabled = True
+    pl.plate = dataclasses.replace(plc.PLATE_PRESETS["24-well"])
+    pl.wells = plc.all_wells(pl.plate)
+    pl.rim_points = [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]]
+    pl.centre_x, pl.centre_y = 96.5, -57.9
+    s.source = {"kind": "cylinder", "width": 10.0, "depth": 10.0, "height": 0.4,
+                "diameter": 6.0, "stl_path": None}
+    return s
+
+
+@pytest.mark.parametrize("guided", [False, True])
+def test_no_generated_line_is_too_long(guided):
+    s = _big_settings()
+    s.placement.guided = guided
+    p = Project.from_cylinder(6, 0.4, s)
+    p.plan()
+    text = p.gcode_text()
+    assert text.count(settingsio.GCODE_JSON_MARKER) > 5        # really split
+    long = [l for l in text.splitlines() if len(l) > MAX_LINE]
+    assert not long, f"{len(long)} line(s) over {MAX_LINE} chars, e.g. {long[0][:80]}"
+    back = settingsio.parse_gcode_settings(text)
+    assert back[3] and back[0].components == s.components
+    assert back[0].start_gcode == s.start_gcode
+
+
+def test_split_json_survives_trailing_space_stripping():
+    s = _big_settings()
+    p = Project.from_cylinder(6, 0.4, s)
+    p.plan()
+    stripped = "\n".join(l.rstrip() for l in p.gcode_text().splitlines())
+    back = settingsio.parse_gcode_settings(stripped)
+    assert back[3] and back[0].start_gcode == s.start_gcode
+    assert back[0].placement == s.placement
+
+
+def test_chunks_never_cut_at_whitespace():
+    payload = "a" * 199 + " " + "b" * 50 + "  c"
+    chunks = settingsio.gcode_settings_chunks(payload, 200)
+    assert "".join(chunks) == payload
+    assert all(not c[0].isspace() and not c[-1].isspace() for c in chunks)
+
+
+def test_old_single_line_json_still_imports():
+    import json
+    s = PrintSettings()
+    s.layer_height = 0.3
+    doc = {"version": 1, "print_settings": settingsio.settings_to_dict(s), "source": {}}
+    text = "%\nG1 X0\n; " + settingsio.GCODE_JSON_MARKER + " " + json.dumps(doc) + "\n%\n"
+    back = settingsio.parse_gcode_settings(text)
+    assert back[3] and back[0].layer_height == 0.3

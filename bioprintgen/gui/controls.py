@@ -6,7 +6,8 @@ to generate, plus a `changed` signal so the preview can auto-refresh.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Signal, Qt, QUrl
@@ -15,12 +16,12 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout, QGroupBox, QComboBox, QDoubleSpinBox,
     QSpinBox, QCheckBox, QPushButton, QLabel, QScrollArea, QFileDialog,
     QHBoxLayout, QTableWidget, QHeaderView, QPlainTextEdit, QToolButton,
-    QSizePolicy, QMenu, QMessageBox,
+    QSizePolicy, QMenu, QMessageBox, QListWidget, QLineEdit,
 )
 
 from ..model import (
     PrintSettings, Dialect, DriveMode,
-    LayerHeightSection, ToolLineRange, InfillSection, pattern_id, parse_pattern,
+    LayerHeightSection, ToolLineRange, InfillSection, Component, pattern_id, parse_pattern,
 )
 from ..gcode import flavour as flavourmod
 from ..infill import patterns as patternreg
@@ -248,6 +249,348 @@ class SectionTable(QWidget):
             w.setValue(value)
 
 
+class ComponentEditor(QWidget):
+    """Extra shapes for the part: a list (add / duplicate / remove / reorder -
+    higher in the list wins where shapes overlap) and a form for the selected
+    one.  `changed` fires on any edit."""
+    changed = Signal()
+    SHAPES = ("cuboid", "cylinder", "stl")
+
+    def __init__(self):
+        super().__init__()
+        self._comps: List[Component] = []
+        self._pattern_ids: List[str] = [""]
+        self._main_bounds = None        # (minx, miny, maxx, maxy) of the main shape
+        self._loading = False
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        self.list = QListWidget()
+        self.list.setMaximumHeight(theme.px(96))
+        self.list.currentRowChanged.connect(self._select)
+        lay.addWidget(self.list)
+        btns = QHBoxLayout()
+        self.add_btn = QPushButton("+ Add")
+        self.dup_btn = QPushButton("Duplicate")
+        self.rem_btn = QPushButton("− Remove")
+        self.up_btn = QPushButton("↑")
+        self.down_btn = QPushButton("↓")
+        self.up_btn.setToolTip("Higher priority: wins where shapes overlap")
+        self.down_btn.setToolTip("Lower priority")
+        for b, slot in ((self.add_btn, self._add), (self.dup_btn, self._duplicate),
+                        (self.rem_btn, self._remove), (self.up_btn, lambda: self._move(-1)),
+                        (self.down_btn, lambda: self._move(1))):
+            b.clicked.connect(slot)
+            btns.addWidget(b)
+        btns.addStretch(1)
+        lay.addLayout(btns)
+
+        self.form_box = QWidget()
+        f = QFormLayout(self.form_box)
+        f.setContentsMargins(0, 4, 0, 0)
+        self._form = f
+        self.enabled = QCheckBox("Include in the print")
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("optional")
+        self.operation = Combo()
+        self.operation.addItems(["Add", "Subtract (void / channel)"])
+        self.operation.setToolTip("Subtract removes its shape from everything lower in "
+                                  "the list (and the main shape) - for channels, pores "
+                                  "and cavities. Shapes higher in the list keep theirs.")
+        self.shape = Combo()
+        self.shape.addItems(["Cuboid", "Cylinder", "STL file"])
+        self.stl_btn = QPushButton("Choose STL…")
+        self.stl_btn.clicked.connect(self._choose_stl)
+        self.stl_name = QLabel("no file")
+        self.stl_name.setObjectName("hint")
+        self.stl_name.setWordWrap(True)
+        stl_row = QHBoxLayout()
+        stl_row.setContentsMargins(0, 0, 0, 0)
+        stl_row.addWidget(self.stl_btn)
+        stl_row.addWidget(self.stl_name, 1)
+        self.stl_row = QWidget()
+        self.stl_row.setLayout(stl_row)
+        self.scale = _dspin(0.1, 10000, 100, 5, 1, " %")
+        self.rot_x = _dspin(-180, 180, 0, 15, 1, "°")
+        self.rot_y = _dspin(-180, 180, 0, 15, 1, "°")
+        self.stl_size = QLabel("")
+        self.stl_size.setObjectName("hint")
+        self._stl_path = ""
+        self.axis = Combo()
+        self.axis.addItems(["Vertical (Z)", "Horizontal"])
+        self.axis.setToolTip("Horizontal: lies flat along the Rotation direction "
+                             "(0° = X, 90° = Y); Z start is its bottom")
+        self.size_x = _dspin(0.1, 500, 4)
+        self.size_y = _dspin(0.1, 500, 4)
+        self.diameter = _dspin(0.1, 500, 4)
+        self.length = _dspin(0.1, 1000, 4)
+        self.height = _dspin(0.02, 500, 2)
+        self.cx = _dspin(-1000, 1000, 0)
+        self.cy = _dspin(-1000, 1000, 0)
+        self.z = _dspin(0, 1000, 0)
+        self.rotation = _dspin(-180, 180, 0, 5, 1, "°")
+        self.extruder = Combo()
+        self.extruder.addItems(["1", "2", "3"])
+        self.extruder.setToolTip("Extruders 2 and 3 need Tool change (Printing process) "
+                                 "on, for their offsets")
+        self.pattern = Combo()
+        self.percent = _dspin(0, 100, 0, 5, 1, " %")
+        self.percent.setSpecialValueText("same as main")
+        self.walls = Spin()
+        self.walls.setRange(0, 999)
+        self.walls.setValue(0)
+        self.walls.setSpecialValueText("merge with part")
+        self.walls.setToolTip("merge with part: no wall between it and the part - the "
+                              "infills meet and the part's walls go round both.\n"
+                              "1, 2, …: that many walls between it and the part (and "
+                              "round its exposed edge), in its own extruder.")
+        for label, w in (("", self.enabled), ("Name", self.name),
+                         ("Operation", self.operation), ("Shape", self.shape),
+                         ("File", self.stl_row), ("Scale", self.scale),
+                         ("Rotation X", self.rot_x), ("Rotation Y", self.rot_y),
+                         ("Axis", self.axis),
+                         ("Size X", self.size_x), ("Size Y", self.size_y),
+                         ("Diameter", self.diameter), ("Length", self.length),
+                         ("Height", self.height),
+                         ("Centre X", self.cx), ("Centre Y", self.cy),
+                         ("Z start", self.z), ("Rotation Z", self.rotation),
+                         ("", self.stl_size),
+                         ("Extruder", self.extruder), ("Infill pattern", self.pattern),
+                         ("Infill %", self.percent), ("Walls", self.walls)):
+            f.addRow(label, w) if label else f.addRow(w)
+        lay.addWidget(self.form_box)
+
+        for w in (self.size_x, self.size_y, self.diameter, self.length, self.height,
+                  self.cx, self.cy, self.z, self.rotation, self.percent, self.walls,
+                  self.scale, self.rot_x, self.rot_y):
+            w.valueChanged.connect(self._edited)
+        for w in (self.operation, self.shape, self.axis, self.extruder, self.pattern):
+            w.currentIndexChanged.connect(self._edited)
+        self.enabled.toggled.connect(self._edited)
+        self.name.textChanged.connect(self._edited)
+        self._refresh_list()
+
+    # ------------------------------------------------------------------ data
+    def components(self) -> List[Component]:
+        return [replace(c) for c in self._comps]
+
+    def set_components(self, comps: List[Component]):
+        self._comps = [replace(c) for c in comps]
+        self._refresh_list(select=0 if self._comps else -1)
+
+    def set_patterns(self, ids: List[str], names: List[str], tips: List[str]):
+        """Pattern choices: "same as main" + the registry."""
+        self._pattern_ids = [""] + list(ids)
+        self._loading = True
+        self.pattern.clear()
+        self.pattern.addItems(["Same as main"] + list(names))
+        for k, tip in enumerate(tips, 1):
+            self.pattern.setItemData(k, tip, Qt.ToolTipRole)
+        self._loading = False
+        self._select(self.list.currentRow())
+
+    def set_main_bounds(self, bounds):
+        """Where the main shape lies: new components start at its centre."""
+        self._main_bounds = bounds
+        if bounds:
+            minx, miny, maxx, maxy = bounds
+            self.list.setToolTip(f"Main shape: X {minx:g} … {maxx:g}, "
+                                 f"Y {miny:g} … {maxy:g}")
+        else:
+            self.list.setToolTip("")
+
+    # ------------------------------------------------------------------ list
+    def _refresh_list(self, select: Optional[int] = None):
+        row = self.list.currentRow() if select is None else select
+        self.list.blockSignals(True)
+        self.list.clear()
+        for i, c in enumerate(self._comps):
+            self.list.addItem(c.label(i))
+        self.list.blockSignals(False)
+        row = min(row, len(self._comps) - 1)
+        self.list.setCurrentRow(row)
+        self._select(row)
+
+    def _free_spot(self, x: float, y: float, step: float):
+        """(x, y), moved along +X/+Y until no component is centred there, so a
+        new shape never lands exactly on (and hidden under) an existing one."""
+        taken = {(round(c.x, 3), round(c.y, 3)) for c in self._comps}
+        while (round(x, 3), round(y, 3)) in taken:
+            x, y = x + step, y + step
+        return x, y
+
+    def _add(self):
+        """New components go to the top of the list (they win overlaps) and
+        start at the centre of the main shape."""
+        c = Component()
+        if self._main_bounds:
+            minx, miny, maxx, maxy = self._main_bounds
+            c.x, c.y = (minx + maxx) / 2.0, (miny + maxy) / 2.0
+        c.x, c.y = self._free_spot(c.x, c.y, 1.0)
+        self._comps.insert(0, c)
+        self._refresh_list(select=0)
+        self.changed.emit()
+
+    def _duplicate(self):
+        """A copy just above the original, shifted so it is not hidden under it."""
+        r = self.list.currentRow()
+        if 0 <= r < len(self._comps):
+            src = self._comps[r]
+            c = replace(src, name=f"{src.name} copy" if src.name else "")
+            c.x, c.y = self._free_spot(src.x + src.size_x / 2.0, src.y, 1.0)
+            self._comps.insert(r, c)
+            self._refresh_list(select=r)
+            self.changed.emit()
+
+    def _remove(self):
+        r = self.list.currentRow()
+        if 0 <= r < len(self._comps):
+            del self._comps[r]
+            self._refresh_list(select=min(r, len(self._comps) - 1))
+            self.changed.emit()
+
+    def _move(self, d: int):
+        r = self.list.currentRow()
+        t = r + d
+        if 0 <= r < len(self._comps) and 0 <= t < len(self._comps):
+            self._comps[r], self._comps[t] = self._comps[t], self._comps[r]
+            self._refresh_list(select=t)
+            self.changed.emit()
+
+    # ------------------------------------------------------------------ form
+    def _select(self, row: int):
+        has = 0 <= row < len(self._comps)
+        self.form_box.setVisible(has)
+        for b in (self.dup_btn, self.rem_btn, self.up_btn, self.down_btn):
+            b.setEnabled(has)
+        if not has:
+            return
+        c = self._comps[row]
+        self._loading = True
+        try:
+            self.enabled.setChecked(c.enabled)
+            self.name.setText(c.name)
+            self.operation.setCurrentIndex(1 if c.subtract else 0)
+            self.shape.setCurrentIndex(self.SHAPES.index(c.shape) if c.shape in self.SHAPES else 0)
+            self.axis.setCurrentIndex(1 if c.axis == "horizontal" else 0)
+            self._stl_path = c.stl_path
+            self.scale.setValue(c.scale)
+            self.rot_x.setValue(c.rot_x)
+            self.rot_y.setValue(c.rot_y)
+            self.size_x.setValue(c.size_x)
+            self.size_y.setValue(c.size_y)
+            self.diameter.setValue(c.size_x)
+            self.length.setValue(c.size_y)
+            self.height.setValue(c.height)
+            self.cx.setValue(c.x)
+            self.cy.setValue(c.y)
+            self.z.setValue(c.z)
+            self.rotation.setValue(c.rotation)
+            self.extruder.setCurrentIndex(max(0, min(2, int(c.extruder) - 1)))
+            if c.pattern not in self._pattern_ids:          # removed / not loaded
+                self._pattern_ids.append(c.pattern)
+                self.pattern.addItem(f"{c.pattern} (missing)")
+            self.pattern.setCurrentIndex(self._pattern_ids.index(c.pattern))
+            self.percent.setValue(c.percent)
+            self.walls.setValue(max(0, int(c.walls)))     # legacy -1 = merge
+        finally:
+            self._loading = False
+        self._show_rows()
+        self._update_stl_info(c)
+
+    def _show_rows(self):
+        cyl = self.shape.currentIndex() == 1
+        stl = self.shape.currentIndex() == 2
+        box_ = self.shape.currentIndex() == 0
+        flat = cyl and self.axis.currentIndex() == 1
+        add = self.operation.currentIndex() == 0
+        for w, on in ((self.axis, cyl), (self.size_x, box_), (self.size_y, box_),
+                      (self.diameter, cyl), (self.length, flat),
+                      (self.height, not flat and not stl),
+                      (self.rotation, box_ or flat or stl),
+                      (self.stl_row, stl), (self.scale, stl), (self.rot_x, stl),
+                      (self.rot_y, stl), (self.stl_size, stl),
+                      (self.extruder, add), (self.pattern, add),
+                      (self.percent, add), (self.walls, add)):
+            self._form.setRowVisible(w, on)
+
+    def _edited(self, *_):
+        if self._loading:
+            return
+        r = self.list.currentRow()
+        if not (0 <= r < len(self._comps)):
+            return
+        c = self._comps[r]
+        c.enabled = self.enabled.isChecked()
+        c.name = self.name.text().strip()
+        c.operation = "subtract" if self.operation.currentIndex() == 1 else "add"
+        c.stl_path = self._stl_path
+        c.scale = self.scale.value()
+        c.rot_x, c.rot_y = self.rot_x.value(), self.rot_y.value()
+        c.shape = self.SHAPES[self.shape.currentIndex()]
+        c.axis = "horizontal" if self.axis.currentIndex() == 1 else "vertical"
+        # Diameter / Size X share Component.size_x; Length / Size Y share size_y
+        if self.sender() is self.diameter:
+            c.size_x = self.diameter.value()
+        elif self.sender() is self.size_x:
+            c.size_x = self.size_x.value()
+        if self.sender() is self.length:
+            c.size_y = self.length.value()
+        elif self.sender() is self.size_y:
+            c.size_y = self.size_y.value()
+        c.height = self.height.value()
+        c.x, c.y, c.z = self.cx.value(), self.cy.value(), self.z.value()
+        c.rotation = self.rotation.value()
+        c.extruder = self.extruder.currentIndex() + 1
+        c.pattern = self._pattern_ids[self.pattern.currentIndex()] \
+            if 0 <= self.pattern.currentIndex() < len(self._pattern_ids) else ""
+        c.percent = self.percent.value()
+        c.walls = self.walls.value()
+        self._loading = True
+        self.size_x.setValue(c.size_x)
+        self.diameter.setValue(c.size_x)
+        self.size_y.setValue(c.size_y)
+        self.length.setValue(c.size_y)
+        self._loading = False
+        self._show_rows()
+        self._update_stl_info(c)
+        item = self.list.item(r)
+        if item is not None:
+            item.setText(c.label(r))
+        self.changed.emit()
+
+    def apply_scale(self):
+        self.list.setMaximumHeight(theme.px(96))
+
+    def _choose_stl(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Component STL", str(Path(self._stl_path).parent) if self._stl_path else "",
+            "Mesh files (*.stl *.obj *.ply *.off);;All files (*)")
+        if path:
+            self.set_stl_path(path)
+
+    def set_stl_path(self, path: str):
+        """Use `path` for the selected component (file dialog, or tests)."""
+        self._stl_path = path
+        self.shape.setCurrentIndex(2)       # also commits via _edited
+        self._edited()
+
+    def _update_stl_info(self, c: Component):
+        self.stl_name.setText(Path(c.stl_path).name if c.stl_path else "no file")
+        self.stl_name.setToolTip(c.stl_path)
+        if c.shape != "stl" or not c.stl_path:
+            self.stl_size.setText("")
+            return
+        try:
+            from ..geometry.components import stl_extents
+            ex, ey, ez = stl_extents(c)
+            self.stl_size.setText(f"Size after scale and rotation: "
+                                  f"{ex:.2f} × {ey:.2f} × {ez:.2f} mm")
+        except Exception as e:  # noqa: BLE001 - shown to the user
+            self.stl_size.setText(f"Can't read this file: {e}")
+
+
 class ParameterPanel(QScrollArea):
     changed = Signal()
     stl_requested = Signal()
@@ -271,7 +614,7 @@ class ParameterPanel(QScrollArea):
         self.sections = {}
         for build in (self._printer_group, self._design_group, self._layers_group,
                       self._extrusion_group, self._process_group,
-                      self._advanced_group):
+                      self._plate_group, self._advanced_group):
             g = build()
             title = g.title()
             g.setTitle("")                       # header lives in the section button
@@ -303,6 +646,7 @@ class ParameterPanel(QScrollArea):
         self.layer_sections.apply_scale()
         self.infill_sections.apply_scale()
         self.tool_ranges.apply_scale()
+        self.components.apply_scale()
         self.start_gcode.setMaximumHeight(theme.px(90))
         self.end_gcode.setMaximumHeight(theme.px(90))
 
@@ -357,6 +701,12 @@ class ParameterPanel(QScrollArea):
         self.stl_label.setWordWrap(True)
         f.addRow(self.stl_btn)
         f.addRow(self.stl_label)
+        f.addRow(self._hint("Components: extra shapes with their own infill, extruder "
+                            "and walls (e.g. a core in ink 2, a denser zone). Placed by "
+                            "their centre; higher in the list wins where shapes overlap "
+                            "(new ones go on top), the main shape is lowest."))
+        self.components = ComponentEditor()
+        f.addRow(self.components)
         return g
 
     def _layers_group(self):
@@ -540,6 +890,67 @@ class ParameterPanel(QScrollArea):
         f.addRow(self.zero_xy)
         return g
 
+    def _plate_group(self):
+        from ..placement import Placement
+        g = QGroupBox("Well plate")
+        f = QFormLayout(g)
+        self._placement = Placement()
+        # set by the main window: () -> radius of the part's footprint (mm)
+        self.part_radius_provider = None
+        self.plate_on = QCheckBox("Print into a multi-well plate")
+        self.plate_on.setToolTip("Print the part into each selected well, with "
+                                 "calibrated positions (Plate setup…)")
+        f.addRow(self.plate_on)
+        self.plate_btn = QPushButton("Plate setup…")
+        self.plate_btn.clicked.connect(self._open_plate_dialog)
+        f.addRow(self.plate_btn)
+        self.plate_summary = self._hint("")
+        f.addRow(self.plate_summary)
+        self.plate_on.toggled.connect(self._plate_toggled)
+        self._update_plate_summary()
+        return g
+
+    def _plate_toggled(self, on: bool):
+        self._placement.enabled = bool(on)
+        self._update_plate_summary()
+        self._update_visibility()
+        if not self._loading:
+            self.changed.emit()
+
+    def _open_plate_dialog(self):
+        from .platedialog import PlateDialog
+        radius = self.part_radius_provider() if self.part_radius_provider else 0.0
+        dlg = PlateDialog(self._placement, radius, self)
+        if dlg.exec():
+            pl = dlg.placement()
+            pl.enabled = self.plate_on.isChecked()
+            self._placement = pl
+            self._update_plate_summary()
+            self.changed.emit()
+
+    def _update_plate_summary(self):
+        from .. import placement as plc
+        pl = self._placement
+        on = self.plate_on.isChecked()
+        self.plate_btn.setEnabled(on)
+        if not on:
+            self.plate_summary.setText("Off — the part prints once, at the current position.")
+            return
+        lines = [f"{pl.plate.name} plate · {len(pl.wells)} well(s)"]
+        ref = f"rim of {pl.rim_well} + centre of {plc.centre_well(pl)}"
+        if pl.guided:
+            lines.append(f"guided calibration at print time: {ref} (Planet CNC)")
+        else:
+            try:
+                cal = plc.calibrate(pl)
+                lines.append(f"calibrated on {ref} · angle {cal.angle:.2f}° · "
+                             f"floor Z {pl.floor_z:g}, rim Z {pl.rim_z:g}")
+            except ValueError as e:
+                lines.append(f"⚠ calibration: {e}")
+        if not pl.wells:
+            lines.append("⚠ no wells selected — open Plate setup…")
+        self.plate_summary.setText("\n".join(lines))
+
     def _advanced_group(self):
         g = QGroupBox("Advanced options")
         f = QFormLayout(g)
@@ -578,6 +989,7 @@ class ParameterPanel(QScrollArea):
             self.infill.setItemData(k, tip, Qt.ToolTipRole)
         self.infill.blockSignals(False)
         self.infill_sections.set_choices(2, labels, tips)
+        self.components.set_patterns(self._pattern_ids, labels, tips)
 
     def _pattern_index(self, pid) -> int:
         """Dropdown index of a pattern id.  An id the registry does not know
@@ -704,6 +1116,7 @@ class ParameterPanel(QScrollArea):
             elif isinstance(w, QCheckBox):
                 w.toggled.connect(emit)
         self.layer_sections.changed.connect(emit)
+        self.components.changed.connect(emit)
         self.infill_sections.changed.connect(emit)
         self.tool_ranges.changed.connect(emit)
         self.start_gcode.textChanged.connect(emit)
@@ -775,6 +1188,8 @@ class ParameterPanel(QScrollArea):
         for w in (self.ext2x, self.ext2y, self.ext3x, self.ext3y,
                   self._tc_hint, self.tool_ranges, self._sel_row):
             self._show(w, tc)
+        # on a plate the positions come from the calibration, not from G92
+        self._show(self.zero_xy, not self.plate_on.isChecked())
 
     # ------------------------------------------------------------------ output
     def set_stl_path(self, path: str):
@@ -871,7 +1286,12 @@ class ParameterPanel(QScrollArea):
             # text
             self.start_gcode.setPlainText(s.start_gcode)
             self.end_gcode.setPlainText(s.end_gcode)
+            self.components.set_components(s.components)
             self.settings_header.setChecked(s.write_settings_header)
+            import copy
+            self._placement = copy.deepcopy(s.placement)
+            self.plate_on.setChecked(s.placement.enabled)
+            self._update_plate_summary()
         finally:
             self._loading = False
         self._update_visibility()
@@ -907,6 +1327,9 @@ class ParameterPanel(QScrollArea):
         s.filament_area = self._hidden["filament_area"]
         s.safe_z = self.safe_z.value()
         s.zero_xy_at_start = self.zero_xy.isChecked()
+        import copy
+        s.placement = copy.deepcopy(self._placement)
+        s.placement.enabled = self.plate_on.isChecked()
         s.minimize_crossings = self._hidden["minimize_crossings"]
         s.flow_start_ramp = self.flow_start_ramp.value()
         s.flow_end_retract = self.flow_end_retract.value()
@@ -924,6 +1347,7 @@ class ParameterPanel(QScrollArea):
         s.tool_change_enabled = self.tool_change.isChecked()
         s.extruder2_offset = (self.ext2x.value(), self.ext2y.value())
         s.extruder3_offset = (self.ext3x.value(), self.ext3y.value())
+        s.components = self.components.components()
         s.tool_line_ranges = [ToolLineRange(int(a), int(b), int(e))
                               for (a, b, e) in self.tool_ranges.rows()]
         # start / end g-code + header

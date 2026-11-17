@@ -12,10 +12,10 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QObject
-from PySide6.QtGui import QPen, QColor, QBrush, QPainter
+from PySide6.QtGui import QPen, QColor, QBrush, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsLineItem, QGraphicsEllipseItem,
-    QGraphicsItem,
+    QGraphicsItem, QGraphicsPathItem,
 )
 
 from ..model import LayerToolpath, Move, MoveKind
@@ -120,6 +120,22 @@ class PreviewScene(QGraphicsScene):
             node_keys.add(_key(m.end))
         self.dense = len(node_keys) > MAX_PERSISTENT_HANDLES
 
+        # component outlines (dashed, behind the toolpath, not editable)
+        for pts, ext in getattr(lt, "outlines", []):
+            path = QPainterPath()
+            path.moveTo(*pts[0])
+            for p in pts[1:]:
+                path.lineTo(*p)
+            path.closeSubpath()
+            item = QGraphicsPathItem(path)
+            # voids (ext 0) in the travel colour, components in their extruder's
+            colour = theme.TRAVEL if ext == 0 else theme.tool_perim_color(ext)
+            pen = QPen(QColor(colour), 0, Qt.DashLine if ext == 0 else Qt.DotLine)
+            item.setPen(pen)
+            item.setZValue(-1)
+            item.setAcceptedMouseButtons(Qt.NoButton)
+            self.addItem(item)
+
         for mi, m in enumerate(lt.moves):
             seg = SegmentItem(mi, m.extrude, m.kind, getattr(m, "extruder", 1))
             seg.setLine(m.start[0], m.start[1], m.end[0], m.end[1])
@@ -175,7 +191,8 @@ class PreviewScene(QGraphicsScene):
             return
         # the split halves inherit the original move's tool assignment
         new = Move(start=p, end=m.end, kind=m.kind, extrude=m.extrude,
-                   radius=None, ccw=m.ccw, extruder=getattr(m, "extruder", 1))
+                   radius=None, ccw=m.ccw, extruder=getattr(m, "extruder", 1),
+                   base_extruder=getattr(m, "base_extruder", 1))
         m.end = p
         m.radius = None
         self.lt.moves.insert(mi + 1, new)
@@ -197,7 +214,8 @@ class PreviewScene(QGraphicsScene):
                     moves[a] = Move(start=moves[a].start, end=moves[b].end,
                                     kind=moves[a].kind, extrude=moves[a].extrude,
                                     radius=None, ccw=moves[a].ccw,
-                                    extruder=getattr(moves[a], "extruder", 1))
+                                    extruder=getattr(moves[a], "extruder", 1),
+                                    base_extruder=getattr(moves[a], "base_extruder", 1))
                     del moves[b]
                     merged = True
                     break

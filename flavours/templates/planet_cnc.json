@@ -4,8 +4,8 @@
   "comment_prefix": ";",
   "header": "%",
   "setup": [
-    "{?zero_xy:G92\tX0\tY0}",
-    "G1\tZ0\tF{f_print}",
+    "{?zero_xy&!plate:G92\tX0\tY0}",
+    "{?!plate:G1\tZ0\tF{f_print}}{?plate:G21\tG90 ;mm, absolute - plate positions}",
     "{?tool_change:",
     "#101 = 0 ; offset extruder 1 XY (reference)",
     "#102 = {e2x} ; offset extruder 2 X",
@@ -46,5 +46,17 @@
     "G0\tX[#<_x> + #{offx_var}]\tY[#<_y> + #{offy_var}]",
     "G92\tX#5\tY#6}"
   ],
-  "tool_change": ""
+  "tool_change": "",
+  "well_start": [
+    "; ===== well {well} ({well_index}/{well_count}) =====",
+    "G0\tZ{z_travel}",
+    "G0\tX{x}\tY{y}",
+    "G0\tZ{z}"
+  ],
+  "well_end": [
+    "G0\tZ{z_travel}",
+    "{?well_pause&!last_well:(msg,Well {well} done - press Resume to continue)",
+    "M0}",
+    "{?well_dwell&!last_well:G4\tP{sec} ;well dwell}"
+  ]
 }

@@ -29,7 +29,9 @@ from ..model import (
     LayerToolpath, Move, MoveKind, PrintSettings, Dialect, DriveMode, pattern_id,
 )
 from .flavour import FlavourTemplate, fill
-from ..settingsio import GCODE_JSON_MARKER, gcode_settings_payload, used_pattern_definitions
+from ..settingsio import (GCODE_JSON_MARKER, gcode_settings_payload, gcode_settings_chunks,
+                          used_pattern_definitions)
+from .. import placement
 
 
 @dataclass
@@ -158,7 +160,8 @@ def flow_emits(lt: LayerToolpath, s: PrintSettings) -> List[_Emit]:
 #  Settings comment block
 # --------------------------------------------------------------------------- #
 _HEADER_SKIP = {"custom_flavour", "layer_sections", "tool_line_ranges",
-                "infill_sections", "start_gcode", "end_gcode", "source"}
+                "infill_sections", "components", "placement", "start_gcode",
+                "end_gcode", "source"}
 
 
 def settings_header_lines(s: PrintSettings, cp: str = ";") -> List[str]:
@@ -182,6 +185,33 @@ def settings_header_lines(s: PrintSettings, cp: str = ";") -> List[str]:
         for sec in s.infill_sections:
             lines.append(f"{cp}   infill z[{sec.z_start} .. {sec.z_end}] "
                          f"pattern={pattern_id(sec.infill_type)} percent={sec.percent}")
+    if s.components:
+        lines.append(f"{cp} components (highest priority first):")
+        for i, c in enumerate(s.components, 1):
+            if c.shape == "stl":
+                size = (f"{c.stl_path} scale {c.scale}% rot "
+                        f"({c.rot_x}, {c.rot_y}, {c.rotation})")
+            elif c.horizontal:
+                size = f"d{c.size_x} length {c.size_y} horizontal"
+            elif c.shape == "cylinder":
+                size = f"d{c.size_x} h{c.height}"
+            else:
+                size = f"{c.size_x}x{c.size_y} h{c.height}"
+            what = (f"subtract {c.shape} {size}" if c.subtract else f"{c.shape} {size}")
+            walls = "merge" if int(c.walls) <= 0 else c.walls
+            extra = "" if c.subtract else (
+                f" extruder {c.extruder} pattern={c.pattern or 'main'}"
+                f" percent={c.percent} walls={walls}")
+            lines.append(f"{cp}   {i}: {what} at ({c.x}, {c.y}, z{c.z}) rot {c.rotation}"
+                         + extra + ("" if c.enabled else " (off)"))
+    if s.placement.enabled:
+        pl = s.placement
+        lines.append(f"{cp} placement: {pl.plate.name} plate, wells "
+                     f"{' '.join(placement.print_order(pl.wells, pl.plate))}, "
+                     f"calibration: rim of {pl.rim_well} + centre of "
+                     f"{placement.centre_well(pl)}"
+                     f"{' (guided at print time)' if pl.guided else ''}, "
+                     f"between wells: {pl.between}")
     if s.tool_line_ranges:
         lines.append(f"{cp} tool_line_ranges (clean-baseline lines):")
         for r in s.tool_line_ranges:
@@ -193,7 +223,9 @@ def settings_header_lines(s: PrintSettings, cp: str = ";") -> List[str]:
         lines.append(f"{cp} source: {src}")
     # machine-readable copy of everything above (+ source, start/end g-code),
     # used by "Import g-code" to restore the session exactly
-    lines.append(f"{cp} {GCODE_JSON_MARKER} {gcode_settings_payload(s)}")
+    chunks = gcode_settings_chunks(gcode_settings_payload(s))
+    lines.append(f"{cp} {GCODE_JSON_MARKER} {chunks[0]}")
+    lines += [f"{cp} {GCODE_JSON_MARKER}+ {c}" for c in chunks[1:]]
     lines.append(f"{cp} ===============================")
     return lines
 
@@ -253,8 +285,13 @@ class PlanetCNCWriter:
         return active if self.s.tool_change_enabled else self.s.extruder_index
 
     # -- tool-change blocks (offset variable + G92 frame shift) --
+    def _offvar(self, e: int) -> Tuple[str, str]:
+        if getattr(self, "guided", False):
+            return (f"#<pc_r{e}x>", f"#<pc_r{e}y>")
+        return self.OFFVAR[e]
+
     def _tc_open(self, e: int, li: int) -> List[GLine]:
-        ox, oy = self.OFFVAR[e]
+        ox, oy = self._offvar(e)
         return _wrap([
             f"; --- tool change: extruder {e} ---",
             "#5 = #<_x>",
@@ -264,7 +301,7 @@ class PlanetCNCWriter:
         ], "toolchange", layer=li)
 
     def _tc_close(self, e: int, li: int) -> List[GLine]:
-        ox, oy = self.OFFVAR[e]
+        ox, oy = self._offvar(e)
         return _wrap([
             f"G92\tX[#<_x> + {ox}]\tY[#<_y> + {oy}] ; remove extruder {e} offset",
         ], "toolchange", layer=li)
@@ -284,9 +321,17 @@ class PlanetCNCWriter:
         out: List[GLine] = []
         out.append(GLine("%", kind="header"))
         out += _preamble(s, ";", layers)
-        if s.zero_xy_at_start:
+        plate = s.placement.enabled
+        # on a plate the coordinates are the calibrated work coordinates, and
+        # each well starts with an absolute move to its first-layer height
+        if s.zero_xy_at_start and not plate:
             out.append(GLine("G92\tX0\tY0", kind="header"))
-        out.append(GLine(f"G1\tZ0\tF{_fmt(s.print_speed,0)}", kind="header"))
+        if not plate:
+            out.append(GLine(f"G1\tZ0\tF{_fmt(s.print_speed,0)}", kind="header"))
+        else:
+            # plate moves are absolute; this also keeps a code line right after
+            # the opening % (Planet CNC reported "empty code" with a blank one)
+            out.append(GLine("G21\tG90 ;mm, absolute - plate positions", kind="header"))
         if s.tool_change_enabled:
             out.append(GLine("", kind="blank"))
             out += _wrap(self._offset_defs(), "header")
@@ -296,8 +341,36 @@ class PlanetCNCWriter:
                              kind="header"))
             out.append(GLine("", kind="blank"))
 
+        if getattr(self, "guided", False):
+            return self._guided_program(out, layers)
+        out += self._body(layers)
+
+        out += _postamble(s, ";")
+
+        # footer
+        if s.drive == DriveMode.PISTON and s.ramp:
+            out.append(GLine(f"G1\t{self.axis_letter}[#<{self.axis_var}> -{_fmt(s.ramp,4)}] ;retract",
+                             kind="footer"))
+        out.append(GLine(f"G1\tZ[#<_z> +{_fmt(s.safe_z,3)}]\tF{_fmt(s.z_speed,0)}"
+                         " ;go to safe height", kind="footer"))
+        out += _settings_tail(s, ";")
+        out.append(GLine("%", kind="footer"))
+        return out
+
+    def _body(self, layers: List[LayerToolpath]) -> List[GLine]:
+        """The layers, ending back on extruder 1."""
+        s = self.s
+        out: List[GLine] = []
         active = 1
         for li, lt in enumerate(layers):
+            if lt.well_first:
+                first = lt.moves[0].end if lt.moves else (0.0, 0.0)
+                out += _wrap([
+                    f"; ===== well {lt.well} ({lt.well_index + 1}/{lt.well_count}) =====",
+                    f"G0\tZ{_fmt(lt.travel_z,3)}",
+                    f"G0\tX{_fmt(first[0])}\tY{_fmt(first[1])}",
+                    f"G0\tZ{_fmt(lt.z,3)}",
+                ], "well", layer=li)
             out.append(GLine(f"; layer {lt.index}  z={_fmt(lt.z,3)}", kind="layer", layer=li))
             valve_open = False
             for emit in flow_emits(lt, s):
@@ -368,7 +441,7 @@ class PlanetCNCWriter:
             # relative Z rise to the *next* layer: use the gap between this
             # layer's z and the next one's so it stays correct across variable-
             # height section boundaries (the next layer's height, not this one's).
-            if li + 1 < len(layers):
+            if li + 1 < len(layers) and not lt.well_last:
                 rise = layers[li + 1].z - lt.z
             else:
                 rise = lt.height
@@ -376,20 +449,46 @@ class PlanetCNCWriter:
             out.append(GLine(f"G1\tZ[#<_z> +{_fmt(rise,4)}]\tF{_fmt(s.z_speed,0)}",
                              kind="layer", layer=li))
             out.append(GLine("", kind="blank"))
+            if lt.well_last:
+                out += _wrap([f"G0\tZ{_fmt(lt.travel_z,3)}"], "well", layer=li)
+                if lt.well_index + 1 < lt.well_count:
+                    if s.placement.between == "pause":
+                        out += _wrap([f"(msg,Well {lt.well} done - press Resume to continue)",
+                                      "M0"], "well", layer=li)
+                    elif s.placement.between == "dwell":
+                        out += _wrap([f"G4\tP{_fmt(s.placement.dwell,3)} ;well dwell"],
+                                     "well", layer=li)
 
         # return to the reference extruder before the footer
         if s.tool_change_enabled and active != 1:
             out += self._tc(active, 1, len(layers) - 1)
+        return out
 
+    def _guided_program(self, out: List[GLine], layers) -> List[GLine]:
+        """Plate printing with the calibration done by the program itself:
+        header, guided calibration, one call per well (G52 + G68 place the
+        part), end; the print is a subprogram after M2, written once."""
+        from .. import placement as plc
+        s, pl = self.s, self.s.placement
+        out += _wrap(plc.guided_calibration(pl, s.tool_change_enabled, layers), "well")
+        for _well, lines in plc.guided_well_calls(pl, layers):
+            out += _wrap(lines, "well")
         out += _postamble(s, ";")
-
-        # footer
         if s.drive == DriveMode.PISTON and s.ramp:
             out.append(GLine(f"G1\t{self.axis_letter}[#<{self.axis_var}> -{_fmt(s.ramp,4)}] ;retract",
                              kind="footer"))
         out.append(GLine(f"G1\tZ[#<_z> +{_fmt(s.safe_z,3)}]\tF{_fmt(s.z_speed,0)}"
                          " ;go to safe height", kind="footer"))
+        # settings block at the end of the main program, so the subprogram
+        # is the last thing before the closing %
         out += _settings_tail(s, ";")
+        out.append(GLine("M2", kind="footer"))
+        out.append(GLine("", kind="blank"))
+        out.append(GLine(f"; ===== the print (subprogram {plc.SUBPROGRAM}, called once per well) =====",
+                         kind="comment"))
+        out.append(GLine(f"O{plc.SUBPROGRAM}", kind="well"))
+        out += self._body(layers)
+        out.append(GLine("M99", kind="well"))
         out.append(GLine("%", kind="footer"))
         return out
 
@@ -463,7 +562,7 @@ class MarlinWriter:
         out.append(GLine("M82 ; absolute extrusion", kind="header"))
         if s.tool_change_enabled:
             out += _wrap(self._offset_defs(), "header")
-        if s.zero_xy_at_start:
+        if s.zero_xy_at_start and not s.placement.enabled:
             out.append(GLine("G92 X0 Y0 Z0 E0", kind="header"))
         else:
             out.append(GLine("G92 E0", kind="header"))
@@ -471,6 +570,13 @@ class MarlinWriter:
 
         active = 1
         for li, lt in enumerate(layers):
+            if lt.well_first:
+                first = lt.moves[0].end if lt.moves else (0.0, 0.0)
+                out += _wrap([
+                    f"; ===== well {lt.well} ({lt.well_index + 1}/{lt.well_count}) =====",
+                    f"G1 Z{_fmt(lt.travel_z,3)} F{_fmt(s.z_speed,0)}",
+                    f"G0 X{_fmt(first[0])} Y{_fmt(first[1])} F{_fmt(s.travel_speed,0)}",
+                ], "well", layer=li)
             out.append(GLine(f"; layer {lt.index} z={_fmt(lt.z,3)}", kind="layer", layer=li))
             out.append(GLine(f"G1 Z{_fmt(lt.z,3)} F{_fmt(s.z_speed,0)}", kind="layer", layer=li))
             for emit in flow_emits(lt, s):
@@ -508,6 +614,15 @@ class MarlinWriter:
                 if emit.stroke_end and s.end_dwell > 0:
                     out.append(GLine(f"G4 S{_fmt(s.end_dwell,3)} ; end dwell", kind="dwell", layer=li))
             out.append(GLine("", kind="blank"))
+            if lt.well_last:
+                out += _wrap([f"G1 Z{_fmt(lt.travel_z,3)} F{_fmt(s.z_speed,0)}"], "well", layer=li)
+                if lt.well_index + 1 < lt.well_count:
+                    if s.placement.between == "pause":
+                        out += _wrap([f"M0 Well {lt.well} done - press to continue"],
+                                     "well", layer=li)
+                    elif s.placement.between == "dwell":
+                        out += _wrap([f"G4 S{_fmt(s.placement.dwell,3)} ; well dwell"],
+                                     "well", layer=li)
 
         if s.tool_change_enabled and active != 1:
             out.append(GLine("T0 ; back to extruder 1", kind="toolchange"))
@@ -593,7 +708,10 @@ class TemplateWriter:
             flow_control=s.flow_control, ramp=bool(s.ramp),
             start_ramp=s.flow_start_ramp > 0, end_retract=s.flow_end_retract > 0,
             start_dwell=s.start_dwell > 0, end_dwell=s.end_dwell > 0,
-            travel_lift=s.travel_lift > 0)
+            travel_lift=s.travel_lift > 0, plate=s.placement.enabled,
+            well_pause=s.placement.between == "pause",
+            well_dwell=s.placement.between == "dwell")
+        values["sec_well"] = _fmt(s.placement.dwell, 3)
         return values, conditions
 
     def _do(self, action: str, kind: str, li=None, mi=None,
@@ -627,9 +745,19 @@ class TemplateWriter:
         out += do("setup", "header")
 
         active = 1
+        n_src = 1 + max((lt.src_index or 0) for lt in layers) if layers else 0
         for li, lt in enumerate(layers):
             lv = dict(layer=lt.index, z=_fmt(lt.z, 3), height=_fmt(lt.height, 4))
-            lw = dict(first_layer=li == 0, last_layer=li == len(layers) - 1)
+            src = lt.src_index if lt.src_index is not None else li
+            last = lt.well_last if lt.src_index is not None else li == len(layers) - 1
+            lw = dict(first_layer=src == 0, last_layer=last)
+            wv = dict(well=lt.well, well_index=lt.well_index + 1, well_count=lt.well_count,
+                      z_travel=_fmt(lt.travel_z, 3), f_travel=_fmt(s.travel_speed, 0))
+            ww = dict(lw, last_well=lt.well_index + 1 >= lt.well_count)
+            if lt.well_first:
+                first = lt.moves[0].end if lt.moves else (0.0, 0.0)
+                out += do("well_start", "well", li, when=ww, x=_fmt(first[0]),
+                          y=_fmt(first[1]), f=f_z, **lv, **wv)
             out += do("layer_change", "layer", li, when=lw, f=f_z, **lv)
 
             valve_open = False
@@ -690,8 +818,12 @@ class TemplateWriter:
             if valve_open:
                 out += do("extruder_off", "valve", li, when=lw, **self._tool_values(active))
             # same relative rise as the built-in writer: the gap to the next layer
-            rise = layers[li + 1].z - lt.z if li + 1 < len(layers) else lt.height
+            rise = layers[li + 1].z - lt.z \
+                if li + 1 < len(layers) and not lt.well_last else lt.height
             out += do("layer_end", "layer", li, when=lw, rise=_fmt(rise, 4), f=f_z, **lv)
+            if lt.well_last:
+                out += do("well_end", "well", li, when=ww, sec=_fmt(s.placement.dwell, 3),
+                          f=f_z, **lv, **wv)
 
         if s.tool_change_enabled and active != 1:
             out += self._switch(active, 1, len(layers) - 1, final=True)
@@ -711,18 +843,19 @@ def move_line_map(clean_glines: List[GLine]) -> dict:
     out = {}
     for i, g in enumerate(clean_glines):
         if g.move is not None and g.layer is not None:
-            out[(g.layer, g.move)] = i + 1
+            out.setdefault((g.layer, g.move), i + 1)    # first well wins
     return out
 
 
 def apply_line_ranges(layers: List[LayerToolpath], clean_glines: List[GLine],
                       ranges) -> None:
     """Set each move's extruder from `ranges` (start/end are 1-based line numbers
-    in the clean generation `clean_glines`).  Resets all moves to extruder 1 first,
-    so this is idempotent and safe to call on every regenerate."""
+    in the clean generation `clean_glines`).  Resets every move to its base
+    extruder first (1, or its component's), so this is idempotent and safe to
+    call on every regenerate."""
     for lt in layers:
         for m in lt.moves:
-            m.extruder = 1
+            m.extruder = getattr(m, "base_extruder", 1)
     line_to_move = {}
     for i, g in enumerate(clean_glines):
         if g.move is not None and g.layer is not None:
@@ -760,7 +893,23 @@ def render(layers: List[LayerToolpath], settings: PrintSettings) -> List[GLine]:
     if problems:
         raise ValueError("Refusing to emit g-code with invalid settings:\n  - "
                          + "\n  - ".join(problems))
-    return make_writer(settings).write(layers)
+    if not settings.placement.enabled:
+        return make_writer(settings).write(layers)
+    if settings.placement.guided:
+        w = PlanetCNCWriter(settings)
+        w.guided = True
+        return w.write(placement.localize(layers))
+    copies = placement.expand(layers, settings.placement)
+    zt = placement.travel_z(settings.placement, layers)
+    for c in copies:
+        c.travel_z = zt
+    out = make_writer(settings).write(copies)
+    # GLine tags name the *planned* layer, so preview <-> code mapping and
+    # line-range tool changes work the same in every well
+    for g in out:
+        if g.layer is not None and 0 <= g.layer < len(copies):
+            g.layer = copies[g.layer].src_index
+    return out
 
 
 def lines_to_text(glines: List[GLine]) -> str:

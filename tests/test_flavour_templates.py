@@ -230,3 +230,17 @@ def test_default_store_is_the_app_folder(monkeypatch):
     monkeypatch.delenv("BIOPRINTGEN_FLAVOURS", raising=False)
     assert fl.flavours_dir() == fl.APP_DIR / "flavours"
     assert fl.templates_dir().parent == fl.flavours_dir()
+
+
+@pytest.mark.parametrize("drive", DRIVES, ids=lambda d: d.value)
+def test_components_match_builtin(drive):
+    """Component extruders produce tool changes the templates must mirror too."""
+    from bioprintgen.model import Component
+    for template_file, dialect in (("planet_cnc.json", Dialect.PLANET_CNC),
+                                   ("marlin.json", Dialect.MARLIN_ABS_E)):
+        s = _base(drive=drive, tool_change_enabled=True, extruder2_offset=(15.0, 1.0),
+                  components=[Component(shape="cylinder", size_x=4, height=0.8, x=5, y=4,
+                                        extruder=2, walls=1)])
+        ref, got = _texts(s, template_file, dialect)
+        assert ("tool change: extruder 2" in ref) or ("T1 ; extruder 2" in ref)
+        _assert_same(ref, got)

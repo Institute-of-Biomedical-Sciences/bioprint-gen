@@ -59,10 +59,11 @@ restored next run.
 | Panel | Settings, in order |
 | --- | --- |
 | **Printer** | Drive · Extruder · Nozzle diameter · G-code flavour · Manage flavours… |
-| **Design** | Shape · Width X · Depth Y · Diameter · Height Z · Choose STL file… |
+| **Design** | Shape · Width X · Depth Y · Diameter · Height Z · Choose STL file… · Components |
 | **Layers** | General layer height · First layer height · variable-height table · Infill pattern + Patterns… · Infill defined by · Strand spacing *or* Period *or* Infill % · Base angle · Layer rotation · infill-sections table · Perimeters · Rotate layer start point |
 | **Extrusion** | Ink flow · Ramp / retract · Start ramp · End retract · Start dwell · End dwell · Coast distance |
 | **Printing process** | Printing speed · Travel speed · Layer change speed · Travel safe height · Final safe height · Enable tool change + offsets · extruder range table · Set XY = 0 at current position |
+| **Well plate** | Print into a multi-well plate · Plate setup… (plate, wells, calibration, between wells) |
 | **Advanced options** | Write settings as comment block · Live flow control (jogpot) · Start g-code · End g-code |
 
 **Renamed in this version** (same setting, new label):
@@ -88,7 +89,8 @@ in `default_settings.json` if you need it.
 ## 3. Basic workflow
 
 1. In **Printer**, pick the drive, nozzle diameter and g-code flavour.
-2. In **Design**, pick the shape — Cuboid, Cylinder, or an STL file.
+2. In **Design**, pick the shape — Cuboid, Cylinder, or an STL file. Optionally add
+   **Components** (below).
 3. Set **Layers** (layer height, infill, perimeters) and **Extrusion**.
 4. Press **Generate** (it also auto-regenerates as you change parameters).
 5. Scan layers with the slider or the ◀ / ▶ buttons.
@@ -97,6 +99,75 @@ in `default_settings.json` if you need it.
 
 To pick up an old job, use **Import g-code** (§10) instead of re-entering the
 settings.
+
+### Components (several shapes in one part)
+
+Under the main shape, **Components** adds extra cuboids, cylinders and STL meshes, each with
+its own infill, extruder and walls — or removes them, for channels and voids.
+Typical uses: a core printed with a second ink, a denser or more porous zone, a
+column standing on a base, a perfusion channel through the scaffold.
+
+- **+ Add / Duplicate / − Remove** manage the list; select a row to edit it below.
+  **↑ / ↓** set the priority: where shapes overlap, the one **higher in the list**
+  owns the area; the main shape is always lowest. A new component goes to the
+  **top** of the list, centred on the main shape (shifted if another component is
+  already centred there); a duplicate goes just above its original, shifted
+  sideways. If a component has no effect — completely covered by others, or a
+  subtract that misses the part — the status bar says so; its outline still shows
+  where it is.
+- **Operation** — **Add** puts material there; **Subtract (void / channel)** removes
+  its shape from everything **lower** in the list and from the main shape.
+  Components *above* a subtract keep their area, so you can put a plug or a lining
+  of another ink inside a void by placing it higher in the list. A void's edges
+  are walled by whatever surrounds them (the part's perimeters, or a component's
+  own walls); Extruder, Infill and Walls don't apply to it and are hidden. A
+  channel that runs out through the side opens the outline there. In the preview a
+  void's outline is dashed grey.
+- **Axis** (cylinders) — **Vertical (Z)** stands up; **Horizontal** lies flat along
+  the **Rotation** direction (0° = along X, 90° = along Y), with **Diameter** and
+  **Length**; **Z start** is its bottom. Each layer cuts it as a slot whose width
+  follows the circle (narrow near its top and bottom), so a horizontal subtract is
+  a round perfusion channel to the accuracy of the layer height.
+- **STL file** (shape) — **Choose STL…** picks the mesh; **Scale** (%) and
+  **Rotation X / Y / Z** set its size and orientation (applied in that order: X,
+  then Y, then Z). The size after scaling and turning is shown underneath. It is
+  placed like the other shapes: the centre of its bounding box goes to **Centre
+  X / Y**, its bottom to **Z start**. Holes in the mesh (a tube's bore) are real
+  holes, walled like any other edge. An STL works as Add or Subtract — e.g. a
+  channel network modelled in CAD, subtracted from a block. The file is read
+  again when it changes on disk; it is stored by path, and **Import g-code**
+  looks for it at that path, then next to the g-code file, then asks (if you
+  cancel, the component is switched off).
+- **Size X / Size Y** (cuboid) or **Diameter** (cylinder), **Height**, **Centre X /
+  Centre Y** (in the same coordinates as the toolpath — hover over the list to see
+  where the main shape lies), **Z start** (bottom of the component) and **Rotation
+  Z** (cuboids). A component is in every layer whose middle lies between Z start and
+  Z start + Height; it may stick out of the main shape or rise above it.
+- **Extruder** — 1, 2 or 3. Extruders 2 and 3 need **Enable tool change**
+  (Printing process) for their offsets; the tool changes are then emitted
+  automatically. Each layer prints one extruder at a time, starting with the one
+  already loaded, so there is one change per layer, not two. Line-range tool
+  changes still work and override the component's extruder for the lines you
+  mark.
+- **Infill pattern** — *Same as main* follows the main infill (including infill
+  sections), or pick any pattern. **Infill %** — *same as main* (0) keeps the main
+  density, converted for the component's pattern.
+- **Walls** is the number of walls between the component and the part:
+  - **merge with part** (0) — no wall between them: the infills meet directly
+    (each stops half a strand short of the shared edge, so they touch without
+    overlapping) and the part's walls go round the combined outline. Use it for
+    graded zones in one material.
+  - **1, 2, …** — exactly that many walls between the component and the part,
+    printed with the component's extruder; they also go round any edge of the
+    component that sticks out of the part. The main part adds no wall of its own
+    along the shared edge, so the part's infill runs right up to the component's
+    wall — a clean separation, e.g. between two inks. Where two such components
+    touch, both bring their walls (1 + 1 = two walls between them).
+- **Include in the print** switches a component off without deleting it.
+
+The preview draws each component's outline dotted in its extruder colour. The
+components are saved in the defaults file and in exported files, so **Import
+g-code** brings them back.
 
 ---
 
@@ -311,7 +382,9 @@ These settings only change the emitted g-code — they never re-slice.
 ### Tool change / multiple extruders
 
 Tool changes are placed **by g-code line range**, not by height, so you can put
-them exactly where you want after seeing the toolpath.
+them exactly where you want after seeing the toolpath. (For multi-material *by
+geometry* — a core in ink 2 — use a **component** with its own extruder instead;
+see §3. Both can be combined: line ranges override the component's extruder.)
 
 1. Tick **Enable tool change** and enter the **XY offsets** for extruders 2 and 3
    (extruder 1 is the (0,0) reference).
@@ -340,6 +413,79 @@ which view you are looking at. **Export always includes the tool changes.**
 
 Tool assignment is a property of each move, so splitting a line inside a marked
 section gives both halves the same tool.
+
+### Well plate (printing into many wells)
+
+Tick **Print into a multi-well plate** (panel **Well plate**) and open **Plate
+setup…**. The part is planned once, as usual, and printed into every selected well:
+moved so the centre of its footprint is on the well centre and turned with the plate.
+
+**Plate.** Pick **6-, 12- or 24-well**: typical values for standard plates (well
+spacing 39.12 / 26.01 / 19.3 mm, well diameter). Check them against your vendor's
+drawing and edit any value; an edited plate is marked *(edited)* and saved with the
+print.
+
+**Wells.** Click wells on the map (a row letter or column number toggles the whole
+row / column; **All** / **None**). They print row by row, alternating direction
+(A1 A2 A3, B3 B2 B1, …), shown under the map.
+
+**Calibration — 4 points.** Choose the two wells used for it:
+
+| Point | Where | What it gives |
+| --- | --- | --- |
+| 1 | the **top edge of the rim** of the **rim well** (default A1) | a rim point, and the **rim height** — moves between wells stay above it |
+| 2, 3 | two more points on that **rim**, spread around it, in any order | the rim well's **centre** (the circle through points 1–3) |
+| 4 | the **centre** of the **centre well** (default: the opposite corner), **nozzle touching its floor** | the second centre — the plate's **rotation** and a spacing check — and the **floor height**: layer 1 prints at floor + the first layer's height |
+
+The farther apart the two wells, the more precise the rotation, which is why the
+opposite corner is the default. Any orientation of the plate works — it comes from
+the two points. The spacing measured between the two wells is shown against the
+plate's (in %); **Use the measured spacing** applies it, for vendors whose spacing
+differs slightly.
+
+**Placing the rim points.** Their order doesn't matter, but their spread does: spread
+evenly around the well (e.g. 12, 4 and 8 o'clock), the centre is about as accurate as
+your jogging; bunched into a quarter of the rim the error is roughly three times
+larger, and with points close together it can reach millimetres. Touch every point
+the same way (same edge).
+
+The points can be given two ways (**Calibration** mode):
+
+- **Typed in here** — jog to each point first and copy X / Y (and Z for points 1
+  and 4) from the controller into the dialog. Works with every flavour. The dialog
+  shows the result live — the rim well's centre, the plate angle, the spacing
+  difference, the floor and travel heights, and whether the part fits in a well (red
+  when it doesn't; the status bar warns too). Re-export when the plate is moved.
+- **Guided at print time (Planet CNC)** — nothing to measure beforehand. When the
+  program starts it lifts the nozzle clear and asks for the four points in turn
+  (*Point 2 of 4: another point on the rim of well A1 … — jog there, then press
+  Resume*). It then shows a summary — centre, plate angle, spacing, rim and floor
+  height — **Resume** prints, **Stop** cancels. One exported file works wherever the
+  plate sits.
+
+  How it works: the print is written **once**, as a subprogram after `M2`; each well
+  calls it inside a `G52` offset and a `G68` rotation computed from your points. Tool
+  changes still work: the program pre-rotates the extruder offsets, because the
+  rotated frame would otherwise turn the physical offset too. All of this was checked
+  on the machine (pauses with jogging, `G52`, `G68` direction, subprogram calls, the
+  tool-change `G92` trick inside an offset). The calibration arithmetic is tested by
+  replaying the generated code against the app's own calculation. Guided mode needs
+  the built-in Planet CNC flavour.
+
+**Printing.** Between wells the head goes up to **the rim height (or the part's top,
+if higher) + Travel clearance**, moves over, and comes down to the first layer; layers
+inside a well work exactly as in a single print (relative Z on Planet CNC). **Between
+wells** can go straight on, **pause** (`M0`, with a message on Planet CNC — e.g. to
+crosslink each well) or **wait** a set time; nothing happens after the last well.
+Each well starts with a `; ===== well B3 (4/12) =====` comment.
+
+Because the positions come from the calibration, **Set XY = 0 at current position**
+is not used (and hidden) while printing on a plate, and the Planet CNC header's
+`G1 Z0` is left out. Tool changes, flow control and everything else work per well
+as usual; clicking a line in any well highlights the segment in the preview (the
+preview shows the part itself, once). Custom flavours get **Well start** / **Well
+end** actions and the `plate`, `well_pause`, `well_dwell`, `last_well` conditions;
+the shipped templates match the built-in writers on a plate too.
 
 ---
 
@@ -397,9 +543,12 @@ lists of lines, so the files are easy to read and edit by hand.
 - **End g-code** is injected before the footer / final lift.
 
 The block contains a human-readable list (`; layer_height = 0.2`, …), a `source:`
-line (shape and dimensions, or the STL path) and one machine-readable line
+line (shape and dimensions, or the STL path) and the machine-readable record
 starting `; BIOPRINTGEN_JSON {…}`, which holds everything — including start/end
-g-code and tool ranges — for an exact restore.
+g-code and tool ranges — for an exact restore. The record is split over several
+lines of at most 200 characters (`; BIOPRINTGEN_JSON+ …` continues it): Planet CNC
+refuses a file with a very long line ("program is empty"). Files from earlier
+versions, with the record on one line, still import.
 
 ### Exported file format
 
@@ -469,7 +618,13 @@ from the toolbar zoom — leaving everything else as you wrote it.
   `infill_sections` (rows of `[z_start, z_end, "gyroid", percent]`). Patterns
   (`infill_type` and in sections) are ids: `"rectilinear_connected"`,
   `"rectilinear_separate"`, `"gyroid"`, or a file name from the `patterns/`
-  folder such as `"schwarz_p"`.
+  folder such as `"schwarz_p"`. `components` is a list of objects with `shape`
+  (`"cuboid"` / `"cylinder"`), `size_x` (diameter for a cylinder), `size_y`,
+  `height`, `x`, `y` (centre), `z` (bottom), `rotation`, `extruder`, `pattern`
+  (`""` = main), `percent` (0 = main), `walls` (0 = merge; -1 from older files also means merge), `name`, `enabled`,
+  `operation` (`"add"` / `"subtract"`), `axis` (`"vertical"` / `"horizontal"`,
+  cylinders; horizontal uses `size_y` as the length), and for `shape: "stl"`:
+  `stl_path`, `scale` (%), `rot_x`, `rot_y` (Z rotation is `rotation`).
 
 ---
 

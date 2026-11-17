@@ -11,9 +11,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import Enum
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+
+from .placement import Placement
 
 
 # --------------------------------------------------------------------------- #
@@ -96,6 +99,79 @@ class InfillSection:
     percent: float = 0.0
 
 
+COMPONENT_SHAPES = ("cuboid", "cylinder", "stl")
+COMPONENT_OPERATIONS = ("add", "subtract")
+CYLINDER_AXES = ("vertical", "horizontal")
+WALLS_MERGE = 0      # Component.walls: no walls of its own, part of the main body
+
+
+@dataclass
+class Component:
+    """An extra shape added to the part, with its own infill / extruder / walls.
+
+    Placed by its *centre* (x, y) in the print frame and its bottom z; for a
+    cylinder `size_x` is the diameter.  Where shapes overlap, the component
+    higher in `PrintSettings.components` owns the area (the main shape is
+    lowest).  `walls` is the number of walls between the component and the
+    rest of the part (and round its exposed edge); 0 = `WALLS_MERGE`, joined
+    seamlessly to the main body, whose walls then go round both.  (Files from
+    the first version used -1 for merge; anything <= 0 means merge.)
+    """
+    shape: str = "cuboid"
+    size_x: float = 4.0
+    size_y: float = 4.0
+    height: float = 2.0
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    rotation: float = 0.0          # degrees about Z (cuboid)
+    extruder: int = 1
+    pattern: str = ""              # "" = the main infill pattern
+    percent: float = 0.0           # 0 = the main infill density
+    walls: int = WALLS_MERGE
+    name: str = ""
+    enabled: bool = True
+    # "subtract" removes its area from everything lower in the list (a void /
+    # channel); extruder, pattern, % and walls then don't apply
+    operation: str = "add"
+    # cylinders only: "horizontal" lies along the rotation direction (0° = +X),
+    # with size_x = diameter and size_y = length; z is its bottom
+    axis: str = "vertical"
+    # shape "stl": a mesh file, scaled (%) and turned about X, then Y, then Z
+    # (`rotation`); its bounding-box centre goes to (x, y), its bottom to z
+    stl_path: str = ""
+    scale: float = 100.0
+    rot_x: float = 0.0
+    rot_y: float = 0.0
+
+    @property
+    def subtract(self) -> bool:
+        return self.operation == "subtract"
+
+    @property
+    def horizontal(self) -> bool:
+        return self.shape == "cylinder" and self.axis == "horizontal"
+
+    def z_top(self) -> float:
+        """Top of a primitive (an STL's height comes from its mesh - see
+        geometry.components.component_top)."""
+        return self.z + (self.size_x if self.horizontal else self.height)
+
+    def label(self, index: int) -> str:
+        if self.shape == "stl":
+            fname = self.stl_path.replace("\\", "/").rsplit("/", 1)[-1] or "no file"
+            size = f"{fname} {self.scale:g}%"
+        elif self.horizontal:
+            size = f"Ø{self.size_x:g} ↔{self.size_y:g}"
+        elif self.shape == "cylinder":
+            size = f"Ø{self.size_x:g}×{self.height:g}"
+        else:
+            size = f"{self.size_x:g}×{self.size_y:g}×{self.height:g}"
+        op = "− " if self.subtract else ""
+        return op + (self.name or f"{index + 1} · {self.shape} {size}") + \
+            ("" if self.enabled else " (off)")
+
+
 # --------------------------------------------------------------------------- #
 #  Settings
 # --------------------------------------------------------------------------- #
@@ -125,6 +201,10 @@ class PrintSettings:
     infill_percent: float = 40.0
     # z-ranges with their own pattern/density; anything uncovered uses the above
     infill_sections: List[InfillSection] = field(default_factory=list)
+    # extra shapes with their own infill / extruder / walls (see Component)
+    components: List[Component] = field(default_factory=list)
+    # print the part into the wells of a multi-well plate (see placement.py)
+    placement: Placement = field(default_factory=Placement)
     perimeters: int = 1                 # number of contour walls before infill
     # cycle each layer's start point (perimeter seam + infill start) around the
     # four bounding-box corners, so start/stop artefacts don't stack up
@@ -256,6 +336,20 @@ class PrintSettings:
         return replace(self, infill_type=sec.infill_type,
                        infill_mode="percent", infill_percent=frac * 100.0)
 
+    def for_component(self, c: Optional["Component"]) -> "PrintSettings":
+        """Settings for a component's infill: its own pattern and %, falling
+        back to these (already per-layer) settings for whatever it leaves at
+        "same as main"."""
+        if c is None or (not c.pattern and c.percent <= 0):
+            return self
+        pat = parse_pattern(c.pattern) if c.pattern else self.infill_type
+        frac = c.percent / 100.0 if c.percent > 0 else self.main_density_fraction()
+        return replace(self, infill_type=pat, infill_mode="percent",
+                       infill_percent=frac * 100.0)
+
+    def component_extruders(self) -> set:
+        return {c.extruder for c in self.components if c.enabled and not c.subtract}
+
     def eff_first_layer_height(self) -> float:
         return self.first_layer_height if self.first_layer_height else self.layer_height
 
@@ -325,6 +419,48 @@ class PrintSettings:
             if not (0 <= sec.percent <= 100):
                 p.append(f"Infill section {i}: % must be between 0 and 100 "
                          "(0 = same density as the main infill).")
+        from .placement import problems as placement_problems
+        p += placement_problems(self.placement)
+        if self.placement.enabled and self.placement.guided \
+                and self.dialect != Dialect.PLANET_CNC:
+            p.append("Plate: guided calibration in the g-code needs the Planet CNC "
+                     "flavour - use typed coordinates for other flavours.")
+        for i, c in enumerate(self.components, 1):
+            if not c.enabled:
+                continue
+            what = f"Component {i}"
+            if c.shape not in COMPONENT_SHAPES:
+                p.append(f"{what}: unknown shape '{c.shape}'.")
+            if c.operation not in COMPONENT_OPERATIONS:
+                p.append(f"{what}: operation must be 'add' or 'subtract'.")
+            if c.shape == "cylinder" and c.axis not in CYLINDER_AXES:
+                p.append(f"{what}: axis must be 'vertical' or 'horizontal'.")
+            if c.shape == "stl":
+                if not c.stl_path:
+                    p.append(f"{what}: choose an STL file.")
+                elif not Path(c.stl_path).is_file():
+                    p.append(f"{what}: STL file not found: {c.stl_path}")
+                if c.scale <= 0:
+                    p.append(f"{what}: scale must be greater than 0 %.")
+            elif c.size_x <= 0 or (c.shape == "cuboid" and c.size_y <= 0) or \
+                    (c.horizontal and c.size_y <= 0) or \
+                    (not c.horizontal and c.height <= 0):
+                p.append(f"{what}: size and height must be greater than 0.")
+            if c.subtract:
+                continue                # a void has no extruder / infill / walls
+            if c.z < 0:
+                p.append(f"{what}: Z start cannot be negative.")
+            if c.extruder not in (1, 2, 3):
+                p.append(f"{what}: extruder must be 1, 2 or 3.")
+            elif c.extruder != 1 and not self.tool_change_enabled:
+                p.append(f"{what} uses extruder {c.extruder}: turn on Tool change "
+                         "(Printing process) so its offset is applied.")
+            if not (0 <= c.percent <= 100):
+                p.append(f"{what}: infill % must be between 0 and 100 (0 = main density).")
+            if int(c.walls) < -1:
+                p.append(f"{what}: walls must be 'merge' (0) or a number of walls.")
+            if c.pattern and _pattern_kind(c.pattern) is None:
+                p.append(f"{what}: pattern '{c.pattern}' is not available.")
         return p
 
     def offset_for_extruder(self, extruder: int) -> Tuple[float, float]:
@@ -382,6 +518,18 @@ class Layer:
     regions: object            # shapely (Multi)Polygon
     height: float              # this layer's own height (first layer may differ)
     extruder: int = 1          # active extruder (tool) for this layer
+    # with components: who owns which area (None = a plain single-part layer)
+    parts: Optional[List["LayerPart"]] = None
+
+
+@dataclass
+class LayerPart:
+    """One owner's share of a composed layer."""
+    component: Optional[int]   # index into PrintSettings.components; None = main shape
+    region: object             # area it owns here (overlaps resolved by priority);
+                               # for a void: the material it actually removes
+    shape: object              # its full cross-section (for preview outlines)
+    void: bool = False         # a subtract component
 
 
 @dataclass
@@ -399,6 +547,7 @@ class Move:
     radius: Optional[float] = None
     ccw: bool = True
     extruder: int = 1          # active tool for this move (set by line-range tool changes)
+    base_extruder: int = 1     # tool before line-range overrides (a component's extruder)
 
     @property
     def length(self) -> float:
@@ -412,6 +561,16 @@ class LayerToolpath:
     height: float
     extruder: int = 1
     moves: List[Move] = field(default_factory=list)
+    # component outlines for the preview: [(points, extruder)]
+    outlines: List[Tuple[list, int]] = field(default_factory=list)
+    # set on the copies placement.expand() makes for multi-well printing
+    src_index: Optional[int] = None    # the planned layer this copy comes from
+    well: str = ""
+    well_index: int = 0
+    well_count: int = 0
+    well_first: bool = False
+    well_last: bool = False
+    travel_z: float = 0.0              # height for the move to the next well
 
     def polylines(self) -> List[List[Tuple[float, float]]]:
         """Group consecutive extruding moves into polylines for preview."""
